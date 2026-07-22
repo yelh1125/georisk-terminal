@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model DailyRiskData {
+  id                 String   @id @default(cuid())
+  date               DateTime @unique @db.Date
+  gpr                Float
+  correlation        Float
+  vix                Float
+  liquidity          Float
+  sentiment          Float
+  gprZ               Float
+  correlationZ       Float
+  vixZ               Float
+  liquidityZ         Float
+  sentimentZ         Float
+  compositeScore     Float
+  riskLevel          String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
