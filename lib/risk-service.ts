@@ -56,8 +56,8 @@ function differenceInDays(later: string, earlier: string): number {
 
 async function getFreshMarketSnapshot(gprReference: number): Promise<FreshMarketFactors> {
   const cached = await getCache<FreshMarketFactors>('risk:market:current');
-  // Source provenance was added after the original cache schema; refresh older snapshots.
-  if (cached?.brentSource) return cached;
+  // Provider version prevents stale pre-upgrade snapshots from masking the current price feed.
+  if (cached?.brentSource && cached.marketProviderVersion === 2) return cached;
   const market = await fetchFreshMarketFactors(gprReference);
   await setCache('risk:market:current', market, 5 * 60);
   return market;

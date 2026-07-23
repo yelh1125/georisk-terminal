@@ -54,7 +54,7 @@ export interface NowcastResponse {
   marketAsOf: string;
   brentAsOf: string;
   brentClose: number;
-  brentSource: 'yahoo_bz_f' | 'fred_dcoilbrenteu';
+  brentSource: 'twelve_data_xbr_usd' | 'yahoo_bz_f' | 'fred_dcoilbrenteu';
   factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
   gprAsOf: string;
   newsAsOf: string;

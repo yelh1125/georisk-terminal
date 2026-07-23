@@ -38,7 +38,8 @@ export type HighFrequencyNews = {
 };
 
 export type FreshMarketFactors = RawFactors & {
-  brentSource: 'yahoo_bz_f' | 'fred_dcoilbrenteu';
+  marketProviderVersion: 2;
+  brentSource: 'twelve_data_xbr_usd' | 'yahoo_bz_f' | 'fred_dcoilbrenteu';
   factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
 };
 
@@ -203,10 +204,34 @@ async function fetchSpyCloseSeries(startDate: string): Promise<NumericSeries> {
   return fetchFredSeries('SP500');
 }
 
-type BrentMarketSeries = { series: NumericSeries; source: 'yahoo_bz_f' | 'fred_dcoilbrenteu' };
+type BrentMarketSeries = { series: NumericSeries; source: 'twelve_data_xbr_usd' | 'yahoo_bz_f' | 'fred_dcoilbrenteu' };
+
+async function fetchTwelveDataSeries(symbol: string, startDate: string, minimumObservations = 1): Promise<NumericSeries> {
+  const apiKey = process.env.TWELVE_DATA_API_KEY;
+  if (!apiKey) throw new Error('TWELVE_DATA_API_KEY is not configured');
+  const { data } = await axios.get<TwelveDataResponse>(TWELVE_DATA_TIME_SERIES_URL, {
+    params: { symbol, interval: '1day', outputsize: 5000, timezone: 'UTC', apikey: apiKey }, timeout: REQUEST_TIMEOUT,
+  });
+  if (data.status === 'error') throw new Error(data.message ?? `Twelve Data ${symbol} returned an error`);
+  const series: NumericSeries = new Map();
+  (data.values ?? []).forEach((row) => {
+    const date = normalizeDate(row.datetime);
+    const close = finite(row.close);
+    if (date && date >= startDate && close !== null) series.set(date, close);
+  });
+  if (series.size < minimumObservations) throw new Error(`Twelve Data ${symbol} returned only ${series.size} usable daily observations`);
+  return series;
+}
 
 /** Brent futures close is the timely oil-market input; FRED's spot series is the published fallback. */
 async function fetchBrentMarketSeries(startDate: string): Promise<BrentMarketSeries> {
+  if (process.env.TWELVE_DATA_API_KEY) {
+    try {
+      return { series: await fetchTwelveDataSeries('XBR/USD', startDate), source: 'twelve_data_xbr_usd' };
+    } catch (error) {
+      console.warn('[fetch] Twelve Data XBR/USD unavailable; trying Yahoo Brent', error instanceof Error ? error.message : error);
+    }
+  }
   const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
   const period2 = Math.floor(Date.now() / 1000) + 86_400;
   try {
@@ -237,18 +262,7 @@ async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
   const twelveDataKey = process.env.TWELVE_DATA_API_KEY;
   if (twelveDataKey) {
     try {
-      const { data } = await axios.get<TwelveDataResponse>(TWELVE_DATA_TIME_SERIES_URL, {
-        params: { symbol: 'XAU/USD', interval: '1day', outputsize: 5000, timezone: 'UTC', apikey: twelveDataKey }, timeout: REQUEST_TIMEOUT,
-      });
-      if (data.status === 'error') throw new Error(data.message ?? 'Twelve Data returned an error');
-      const series: NumericSeries = new Map();
-      (data.values ?? []).forEach((row) => {
-        const date = normalizeDate(row.datetime);
-        const close = finite(row.close);
-        if (date && date >= startDate && close !== null) series.set(date, close);
-      });
-      if (series.size >= 252) return series;
-      throw new Error(`Twelve Data returned only ${series.size} usable XAU/USD daily observations`);
+      return await fetchTwelveDataSeries('XAU/USD', startDate, 252);
     } catch (error) {
       console.warn('[fetch] Twelve Data XAU/USD unavailable; trying Yahoo fallback', error instanceof Error ? error.message : error);
     }
@@ -276,6 +290,13 @@ async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
 }
 
 async function fetchWtiCloseSeries(startDate: string): Promise<NumericSeries> {
+  if (process.env.TWELVE_DATA_API_KEY) {
+    try {
+      return await fetchTwelveDataSeries('WTI/USD', startDate);
+    } catch (error) {
+      console.warn('[fetch] Twelve Data WTI/USD unavailable; trying Yahoo WTI', error instanceof Error ? error.message : error);
+    }
+  }
   const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
   const period2 = Math.floor(Date.now() / 1000) + 86_400;
   try {
@@ -434,6 +455,7 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
     vix: vix.get(factorAsOf.vix)!,
     liquidity: Number((baa10y.get(factorAsOf.liquidity)! * 100).toFixed(2)),
     sentiment: skew.get(factorAsOf.sentiment)!,
+    marketProviderVersion: 2,
     brentSource: brentMarket.source,
     factorAsOf,
   };

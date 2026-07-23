@@ -78,7 +78,7 @@
 | `GET /api/risk/realtime` | 严格 JSON 实时风险快照，字段为 `calc_date`、`gpr_release_date`、`market_factors`、`news_pulse_z`、`market_score`、`risk_score`、`risk_level`、`action`、`news_trigger`、`comment` |
 | `POST /api/risk/update` | 触发抓取、计算、写库和缓存失效；设置 `CRON_SECRET` 后需请求头 `x-cron-secret` |
 
-抓取器使用 Yahoo Finance `BZ=F` 布伦特、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。设置 `TWELVE_DATA_API_KEY` 后，Gold/Oil 使用 Twelve Data `XAU/USD` 5,000 点日线历史与最新观测；未设置或供应商不可用时，该增强因子自动排除并重新归一化。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
+抓取器默认使用 Twelve Data `XBR/USD`（Brent Spot）与 `WTI/USD` 获取当前油价和价差；这需要 `TWELVE_DATA_API_KEY` 具备商品时序访问权限。未配置或供应商不可用时才依序回退 Yahoo Finance `BZ=F`/`CL=F` 和 FRED `DCOILBRENTEU`/`DCOILWTICO`，页面会明确标示 FRED 回退可能滞后。相同 Key 也提供 Gold/Oil 的 `XAU/USD` 5,000 点日线历史与最新观测；供应商不可用时，该增强因子自动排除并重新归一化。其余来源为 `OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
 
 AI-GPR 是低频回测序列，而非当日观测，不参与实时得分。高频新闻同时统计文章计数与标题/摘要负面情感比例，关键词包括 `war`、`missile`、`invasion`、`sanction`、`tariff`、`blockade`、`airstrike` 与 `nuclear talks`。GDELT 提供经校准的主计数和事件导出；Google News RSS、BBC World RSS 与配置了 `NEWS_API_KEY` 的 NewsAPI 并行确认情感及组合事件，避免单一来源漏报地区冲突。
 
