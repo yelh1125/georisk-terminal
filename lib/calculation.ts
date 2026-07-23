@@ -1,7 +1,7 @@
 import type { RawFactors, RiskLevel, RiskRecord, StrategySignal } from '@/lib/types';
 
 export const FACTOR_WEIGHTS = {
-  gpr: 0.3,
+  brent: 0.3,
   correlation: 0.25,
   vix: 0.2,
   liquidity: 0.15,
@@ -9,6 +9,7 @@ export const FACTOR_WEIGHTS = {
 } as const;
 
 type FactorName = keyof typeof FACTOR_WEIGHTS;
+type FactorZ = Record<FactorName | 'gpr', number>;
 
 const round = (value: number, precision = 3) => Number(value.toFixed(precision));
 
@@ -29,8 +30,9 @@ export function getRiskLevel(score: number): RiskLevel {
 }
 
 /**
- * Five-factor weighted sum specified by the strategy design. The weights total 1.00,
- * following a linear factor model approach (see Grinold & Kahn, Active Portfolio Management).
+ * Daily-close market model. AI-GPR is deliberately excluded because its release lag makes
+ * it unsuitable as a same-day trading input. The five weights total 1.00.
+ * The linear factor form follows Grinold & Kahn, Active Portfolio Management.
  */
 export function calculateRiskRecord(history: RawFactors[], current: RawFactors): RiskRecord {
   const window = history.slice(-252);
@@ -38,9 +40,14 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
   const gprBaseline = history
     .filter((row) => row.date >= '2010-01-01' && row.date <= '2019-12-31')
     .map((row) => row.gpr);
-  const factorZ = {} as Record<FactorName, number>;
+  const factorZ = {} as FactorZ;
+  const brentReturns = history.slice(-257).map((row, index, values) => index < 5 ? null : row.brent / values[index - 5].brent - 1).filter((value): value is number => value !== null);
+  const currentBrentWindow = [...history.slice(-5), current];
+  const currentBrentReturn = currentBrentWindow.length >= 6 ? current.brent / currentBrentWindow[0].brent - 1 : 0;
 
-  // GPR follows the 2010-2019 fixed historical baseline requested for the published index.
+  // Brent 5-session return captures an oil-market shock, rather than treating a high price level as risk by itself.
+  factorZ.brent = zScore(currentBrentReturn, brentReturns);
+  // AI-GPR remains a labelled backtest reference, not a component of compositeScore.
   factorZ.gpr = zScore(current.gpr, gprBaseline.length >= 252 ? gprBaseline : window.map((row) => row.gpr));
   // Stock-bond correlation is a regime signal, so its Z-score uses a five-year reference window.
   factorZ.correlation = zScore(current.correlation, correlationWindow.map((row) => row.correlation));
@@ -48,7 +55,7 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
   factorZ.liquidity = zScore(current.liquidity, window.map((row) => row.liquidity));
   factorZ.sentiment = zScore(current.sentiment, window.map((row) => row.sentiment));
 
-  // Composite = 0.30 GPR_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 Sentiment_Z.
+  // Close model = 0.30 BrentShock_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 SKEW_Z.
   const compositeScore = (Object.keys(FACTOR_WEIGHTS) as FactorName[]).reduce(
     (sum, factor) => sum + FACTOR_WEIGHTS[factor] * factorZ[factor],
     0,
@@ -56,6 +63,7 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
 
   return {
     ...current,
+    brentZ: round(factorZ.brent),
     gprZ: round(factorZ.gpr),
     correlationZ: round(factorZ.correlation),
     vixZ: round(factorZ.vix),
@@ -67,25 +75,25 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
 }
 
 /** A 20-session breakout is the Donchian-channel rule popularized by trend-following systems (Turtle Trading rules). */
-export function isGprBreakout(history: RawFactors[], currentGpr: number): boolean {
-  const prior20 = history.slice(-20).map((row) => row.gpr);
-  return prior20.length === 20 && currentGpr > Math.max(...prior20);
+export function isBrentBreakout(history: RawFactors[], currentBrent: number): boolean {
+  const prior20 = history.slice(-20).map((row) => row.brent);
+  return prior20.length === 20 && currentBrent > Math.max(...prior20);
 }
 
 export function determineStrategy(history: RiskRecord[], latest: RiskRecord): StrategySignal {
-  const rawHistory = history.map(({ date, gpr, correlation, vix, liquidity, sentiment }) => ({
-    date, gpr, correlation, vix, liquidity, sentiment,
+  const rawHistory = history.map(({ date, brent, gpr, correlation, vix, liquidity, sentiment }) => ({
+    date, brent, gpr, correlation, vix, liquidity, sentiment,
   }));
   const vixFalling = history.length > 1 && latest.vix < history.at(-2)!.vix;
 
-  if (latest.compositeScore > 0.6 && isGprBreakout(rawHistory.slice(0, -1), latest.gpr)) {
+  if (latest.compositeScore > 0.6 && isBrentBreakout(rawHistory.slice(0, -1), latest.brent)) {
     return {
       type: 'RISK_ON_HEDGE',
       strength: latest.compositeScore > 0.8 ? 'STRONG' : 'LIGHT',
       title: latest.compositeScore > 0.8 ? '极高地缘风险：重仓对冲' : '高地缘风险：轻仓试错',
       recommendation: latest.compositeScore > 0.8
         ? '建议增配黄金 ETF 20%，配置原油与国防股，同时减持航空和高估值成长股。'
-        : 'GPR 突破 20 日高点，可小仓位做多黄金、原油和国防股，设置严格止损。',
+        : '布伦特原油突破 20 日高点，可小仓位做多黄金、能源和国防股，设置严格止损。',
     };
   }
 

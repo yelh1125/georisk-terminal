@@ -10,7 +10,9 @@ datasource db {
 model DailyRiskData {
   id                 String   @id @default(cuid())
   date               DateTime @unique @db.Date
+  brent              Float
   gpr                Float
+  brentZ             Float
   correlation        Float
   vix                Float
   liquidity          Float

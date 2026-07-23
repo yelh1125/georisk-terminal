@@ -2,6 +2,9 @@ export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 
 export interface RawFactors {
   date: string;
+  /** Brent front-month settlement / latest available close in USD per barrel. */
+  brent: number;
+  /** Published academic reference only. It never contributes to the live score. */
   gpr: number;
   correlation: number;
   vix: number;
@@ -10,6 +13,7 @@ export interface RawFactors {
 }
 
 export interface RiskRecord extends RawFactors {
+  brentZ: number;
   gprZ: number;
   correlationZ: number;
   vixZ: number;
@@ -38,13 +42,16 @@ export interface NowcastResponse {
   tomorrowScore: number;
   riskLevel: RiskLevel;
   marketAsOf: string;
+  brentAsOf: string;
+  brentClose: number;
+  factorAsOf: { brent: string; correlation: string; vix: string; liquidity: string; sentiment: string };
   gprAsOf: string;
   newsAsOf: string;
   newsPulseZ: number;
   articleCount: number;
   negativeSentimentRatio: number;
   comboBoost: number;
-  newsSource: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'estimated';
+  newsSource: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events' | 'estimated';
   newsStatus: 'live' | 'estimated';
   signal: StrategySignal;
 }
@@ -53,12 +60,14 @@ export interface RealtimeRiskSnapshot {
   calc_date: string;
   gpr_release_date: string;
   market_factors: {
-    gpr_anchor_z: number;
+    brent_z: number;
     rho_eq_bond_z: number;
     vix_z: number;
     baa10y_z: number;
     skew_z: number;
-    gpr_source: 'GDELT_bridged' | 'AI-GPR_lagged' | 'ESTIMATED';
+    /** Present for data-vintage disclosure only; this field has zero model weight. */
+    gpr_reference_z: number;
+    gpr_source: 'AI-GPR_lagged' | 'ESTIMATED';
   };
   news_pulse_z: number;
   market_score: number;

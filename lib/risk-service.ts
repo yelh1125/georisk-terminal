@@ -1,5 +1,5 @@
 import { calculateRiskRecord, determineStrategy, zScore } from '@/lib/calculation';
-import { fetchCurrentFactors, fetchFreshMarketFactors, fetchHighFrequencyNews, fetchRealFactorHistory, invalidatePublishedGprCache } from '@/lib/fetchers';
+import { fetchCurrentFactors, fetchFreshMarketFactors, fetchHighFrequencyNews, fetchRealFactorHistory, invalidatePublishedGprCache, type FreshMarketFactors } from '@/lib/fetchers';
 import { deleteCache, getCache, setCache } from '@/lib/cache';
 import { getRiskHistory, replaceMemoryHistory, upsertRiskRecord } from '@/lib/store';
 import type { NowcastResponse, RawFactors, RealtimeRiskSnapshot, RiskResponse, StrategySignal } from '@/lib/types';
@@ -27,7 +27,7 @@ export async function runDailyRiskUpdate(): Promise<RiskResponse> {
   const { records } = await ensureRiskHistory();
   const raw = await fetchCurrentFactors();
   const current = calculateRiskRecord(records, {
-    date: raw.date,
+    date: raw.date, brent: raw.brent,
     gpr: raw.gpr, correlation: raw.correlation, vix: raw.vix, liquidity: raw.liquidity, sentiment: raw.sentiment,
   });
   const source = await upsertRiskRecord(current);
@@ -36,25 +36,25 @@ export async function runDailyRiskUpdate(): Promise<RiskResponse> {
   return { latest: current, signal: determineStrategy(updatedHistory, current), updatedAt: new Date().toISOString(), source };
 }
 
-type NewsObservation = { count: number; negativeRatio: number; comboDetected: boolean; source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt'; observedAt: string };
+type NewsObservation = { count: number; negativeRatio: number; comboDetected: boolean; source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events'; observedAt: string };
 type NewsMetrics = { pulseZ: number; rawZ: number; count: number; negativeRatio: number; comboBoost: number; asOf: string; source: NewsObservation['source'] };
-type RealtimeCalculation = { snapshot: RealtimeRiskSnapshot; marketAsOf: string; newsAsOf: string; articleCount: number; negativeSentimentRatio: number; comboBoost: number; newsSource: NowcastResponse['newsSource']; newsLive: boolean };
+type RealtimeCalculation = { snapshot: RealtimeRiskSnapshot; marketAsOf: string; brentAsOf: string; brentClose: number; factorAsOf: NowcastResponse['factorAsOf']; newsAsOf: string; articleCount: number; negativeSentimentRatio: number; comboBoost: number; newsSource: NowcastResponse['newsSource']; newsLive: boolean };
 
 const round = (value: number) => Number(value.toFixed(3));
 const clip = (value: number, lower = -3, upper = 3) => Math.max(lower, Math.min(upper, value));
 
 function rawFactors(records: import('@/lib/types').RiskRecord[]): RawFactors[] {
-  return records.map(({ date, gpr, correlation, vix, liquidity, sentiment }) => ({ date, gpr, correlation, vix, liquidity, sentiment }));
+  return records.map(({ date, brent, gpr, correlation, vix, liquidity, sentiment }) => ({ date, brent, gpr, correlation, vix, liquidity, sentiment }));
 }
 
 function differenceInDays(later: string, earlier: string): number {
   return Math.max(0, Math.floor((Date.parse(`${later}T00:00:00Z`) - Date.parse(`${earlier}T00:00:00Z`)) / 86_400_000));
 }
 
-async function getFreshMarketSnapshot(gpr: number): Promise<RawFactors> {
-  const cached = await getCache<RawFactors>('risk:market:current');
+async function getFreshMarketSnapshot(gprReference: number): Promise<FreshMarketFactors> {
+  const cached = await getCache<FreshMarketFactors>('risk:market:current');
   if (cached) return cached;
-  const market = await fetchFreshMarketFactors(gpr);
+  const market = await fetchFreshMarketFactors(gprReference);
   await setCache('risk:market:current', market, 5 * 60);
   return market;
 }
@@ -89,7 +89,8 @@ async function getHighFrequencyNewsMetrics(): Promise<NewsMetrics> {
   const countHistory = sameSource.map((item) => Math.log(item.count + 1));
   const sentimentHistory = sameSource.map((item) => item.negativeRatio);
   const gdeltScale = current.source === 'gdelt_newsapi' || current.source === 'gdelt_google' || current.source === 'gdelt';
-  const countZ = zWithBootstrap(Math.log(current.count + 1), countHistory, gdeltScale ? Math.log(12_000) : Math.log(20), gdeltScale ? 0.55 : 0.65);
+  const eventScale = current.source === 'gdelt_events';
+  const countZ = zWithBootstrap(Math.log(current.count + 1), countHistory, eventScale ? Math.log(250) : gdeltScale ? Math.log(12_000) : Math.log(20), eventScale ? 0.8 : gdeltScale ? 0.55 : 0.65);
   const sentimentZ = zWithBootstrap(current.negativeRatio, sentimentHistory, 0.55, 0.18);
   const comboBoost = current.comboDetected ? 0.5 : 0;
   const rawZ = clip(0.60 * countZ + 0.40 * sentimentZ + comboBoost, 0, 3);
@@ -133,37 +134,30 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
   const [marketRaw, newsResult] = await Promise.all([getFreshMarketSnapshot(latestPublished.gpr), getHighFrequencyNewsMetrics().catch(() => null)]);
   const lagDays = differenceInDays(calcDate, latestPublished.date);
   const lastKnown = newsResult ? null : await getCache<NewsMetrics>('risk:news:last-known');
-  let gprAnchorZ = clip(aiGprZ);
+  const gprReferenceZ = clip(aiGprZ);
   let gprSource: RealtimeRiskSnapshot['market_factors']['gpr_source'] = 'AI-GPR_lagged';
-  if (!newsResult) {
-    // Last-resort fallback retains the prior news state but never claims it is a fresh GPR observation.
-    gprAnchorZ = clip(aiGprZ + 0.3 * (lastKnown?.pulseZ ?? 0) * 0.75);
-    gprSource = 'ESTIMATED';
-  }
+  if (!newsResult) gprSource = 'ESTIMATED';
   const marketFactors = calculateRiskRecord(history, marketRaw);
   const newsPulseZ = clip(newsResult?.pulseZ ?? (lastKnown?.pulseZ ?? 0) * 0.75, 0, 3);
-  // Real-time news is 30% of the risk temperature; AI-GPR is a 20% slow-moving anchor.
-  const marketScore = 0.20 * gprAnchorZ + 0.30 * newsPulseZ + 0.20 * marketFactors.correlationZ + 0.15 * marketFactors.vixZ + 0.10 * marketFactors.liquidityZ + 0.05 * marketFactors.sentimentZ;
-  // Fail closed: stale academic GPR plus a total high-frequency news outage must never be reported as low risk.
-  const dataQualityFloor = !newsResult && lagDays > 5 ? 0.60 : 0;
-  const riskScore = Math.max(marketScore, dataQualityFloor);
+  // AI-GPR has zero score weight. Real-time score uses timely market closes and high-frequency news only.
+  const marketScore = 0.20 * marketFactors.brentZ + 0.30 * newsPulseZ + 0.20 * marketFactors.correlationZ + 0.15 * marketFactors.vixZ + 0.10 * marketFactors.liquidityZ + 0.05 * marketFactors.sentimentZ;
+  const riskScore = marketScore;
   const riskLevel = chineseRiskLevel(riskScore);
   const action = actionFor(riskScore, newsPulseZ);
   const newsComment = newsResult
     ? `${newsResult.source === 'gdelt_newsapi' ? 'GDELT 计数与 NewsAPI 情感' : newsResult.source === 'newsapi' ? 'NewsAPI 计数与情感' : newsResult.source === 'gdelt_google' ? 'GDELT 计数与 Google News 情感' : newsResult.source === 'google_rss' ? 'Google News RSS 计数与情感' : 'GDELT 计数'}驱动新闻脉冲 ${newsPulseZ.toFixed(2)}Z${newsResult.comboBoost ? '，制裁+关税+军事行动组合拳加成 +0.50' : ''}`
-    : dataQualityFloor
-      ? '高频新闻源暂不可用且学术 GPR 已滞后，触发 0.60 的保护性风控下限 [DATA-QUALITY GUARD]'
-      : '两路高频新闻源暂不可用，沿用衰减后的上一期新闻脉冲 [ESTIMATED]';
-  const lagComment = lagDays > 5 ? `AI-GPR滞后${lagDays}天，仅作为长期锚，不作为当日观测。` : 'AI-GPR仅作为长期锚，不作为当日观测。';
+    : '两路高频新闻源暂不可用，沿用衰减后的上一期新闻脉冲 [ESTIMATED]';
+  const lagComment = lagDays > 5 ? `AI-GPR滞后${lagDays}天，仅用于回测对照，权重为 0%。` : 'AI-GPR仅用于回测对照，权重为 0%。';
   const snapshot: RealtimeRiskSnapshot = {
     calc_date: calcDate,
     gpr_release_date: latestPublished.date,
     market_factors: {
-      gpr_anchor_z: round(gprAnchorZ),
+      brent_z: marketFactors.brentZ,
       rho_eq_bond_z: marketFactors.correlationZ,
       vix_z: marketFactors.vixZ,
       baa10y_z: marketFactors.liquidityZ,
       skew_z: marketFactors.sentimentZ,
+      gpr_reference_z: round(gprReferenceZ),
       gpr_source: gprSource,
     },
     news_pulse_z: round(newsPulseZ),
@@ -177,6 +171,9 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
   return {
     snapshot,
     marketAsOf: marketRaw.date,
+    brentAsOf: marketRaw.factorAsOf.brent,
+    brentClose: marketRaw.brent,
+    factorAsOf: marketRaw.factorAsOf,
     newsAsOf: newsResult?.asOf ?? 'unavailable',
     articleCount: newsResult?.count ?? 0,
     negativeSentimentRatio: newsResult?.negativeRatio ?? 0,
@@ -201,6 +198,9 @@ export async function getRiskNowcast(): Promise<NowcastResponse> {
     tomorrowScore,
     riskLevel,
     marketAsOf: result.marketAsOf,
+    brentAsOf: result.brentAsOf,
+    brentClose: result.brentClose,
+    factorAsOf: result.factorAsOf,
     gprAsOf: snapshot.gpr_release_date,
     newsAsOf: result.newsAsOf,
     newsPulseZ: snapshot.news_pulse_z,

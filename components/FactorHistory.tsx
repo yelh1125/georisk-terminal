@@ -6,9 +6,9 @@ import {
 } from 'recharts';
 import type { RiskRecord } from '@/lib/types';
 
-type FactorId = 'gpr' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
-type MetricKey = 'gpr' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
-type ZKey = 'gprZ' | 'vixZ' | 'correlationZ' | 'liquidityZ' | 'sentimentZ';
+type FactorId = 'brent' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
+type MetricKey = 'brent' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
+type ZKey = 'brentZ' | 'vixZ' | 'correlationZ' | 'liquidityZ' | 'sentimentZ';
 
 type FactorDefinition = {
   id: FactorId;
@@ -27,10 +27,10 @@ type FactorDefinition = {
 
 const FACTORS: FactorDefinition[] = [
   {
-    id: 'gpr', label: '地缘政治风险', shortLabel: 'GPR 指数', valueKey: 'gpr', zKey: 'gprZ', unit: 'index', color: '#c2410c', activeClass: 'border-orange-700 bg-orange-700 text-white',
-    source: 'Matteo Iacoviello 官方 AI-GPR 日度 CSV；可配置官方传统 GPR Excel 直链用于传统序列交叉核验。',
-    definition: '新闻文本中与战争、恐怖主义和国际紧张局势相关的关注度代理。',
-    formula: 'GPR = 0.50 x Threat + 0.35 x Acts + 0.15 x Total（与提供的工作簿逻辑一致）。',
+    id: 'brent', label: '布伦特原油冲击', shortLabel: 'Brent 原油', valueKey: 'brent', zKey: 'brentZ', unit: 'USD/bbl', color: '#c2410c', activeClass: 'border-orange-700 bg-orange-700 text-white',
+    source: 'Yahoo Finance BZ=F 日线收盘；不可用时回退至 FRED DCOILBRENTEU 布伦特现货价格。',
+    definition: '能源供给中断、航运风险和制裁升级会优先反映在布伦特油价；模型使用冲击而非静态价格水平。',
+    formula: 'BrentShock = Z(Brent_t / Brent_t-5 - 1, 252 个交易日)。',
     weight: '30%',
   },
   {
@@ -68,7 +68,7 @@ function formatDate(date: string) {
 }
 
 export default function FactorHistory({ records }: { records: RiskRecord[] }) {
-  const [selected, setSelected] = useState<FactorId[]>(['gpr', 'vix']);
+  const [selected, setSelected] = useState<FactorId[]>(['brent', 'vix']);
   const [range, setRange] = useState<30 | 90 | 365>(90);
   const [chartType, setChartType] = useState<'line' | 'bar'>('line');
   const [scale, setScale] = useState<'raw' | 'z'>('raw');
@@ -126,13 +126,27 @@ export default function FactorHistory({ records }: { records: RiskRecord[] }) {
       </div>
 
       <div className="mt-5 grid gap-3 border-t border-slate-100 pt-5 lg:grid-cols-2">
-        <article className="border-l-4 border-teal bg-teal/5 p-4"><h3 className="font-semibold text-ink">标准化与合成公式</h3><p className="mt-2 text-sm leading-6 text-slate-600">GPR 以 2010-2019 固定基线计算 Z；股债相关性使用五年滚动基线；VIX、流动性和情绪使用 252 个交易日窗口。综合得分 = 0.30 GPR_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 Sentiment_Z。</p></article>
+        <article className="border-l-4 border-teal bg-teal/5 p-4"><h3 className="font-semibold text-ink">收盘模型公式</h3><p className="mt-2 text-sm leading-6 text-slate-600">布伦特冲击、VIX、信用利差和 SKEW 使用 252 个交易日标准化；股债相关性使用五年滚动基线。综合得分 = 0.30 BrentShock_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 SKEW_Z。AI-GPR 权重为 0%，仅在下方作为滞后参考序列。</p></article>
         <article className="border-l-4 border-signal bg-orange-50 p-4"><h3 className="font-semibold text-ink">读图约定</h3><p className="mt-2 text-sm leading-6 text-slate-600">原始值用于检查数据本身；Z-score 用于跨因子的相对极端程度比较。权重反映因子在综合风险得分中的线性贡献，不代表单独交易仓位。</p></article>
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         {selectedFactors.map((factor) => <article key={`${factor.id}-details`} className="border border-slate-200 p-4"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{factor.label}</h3><span className="text-sm font-mono text-teal">{factor.weight}</span></div><dl className="mt-3 space-y-2 text-sm leading-6"><div><dt className="font-medium text-slate-500">数据来源</dt><dd className="text-slate-700">{factor.source}</dd></div><div><dt className="font-medium text-slate-500">指标含义</dt><dd className="text-slate-700">{factor.definition}</dd></div><div><dt className="font-medium text-slate-500">原始计算</dt><dd className="font-mono text-xs text-slate-700">{factor.formula}</dd></div></dl></article>)}
       </div>
+
+      <BacktestComparison records={records} />
     </section>
   );
+}
+
+function BacktestComparison({ records }: { records: RiskRecord[] }) {
+  const data = records.slice(-365).map((row) => ({ date: row.date, model: row.compositeScore, aiGpr: row.gprZ }));
+  const paired = data.filter((row) => Number.isFinite(row.model) && Number.isFinite(row.aiGpr));
+  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const model = paired.map((row) => row.model);
+  const gpr = paired.map((row) => row.aiGpr);
+  const correlation = model.length > 2 ? (() => { const mx = mean(model); const my = mean(gpr); const numerator = model.reduce((sum, value, index) => sum + (value - mx) * (gpr[index] - my), 0); const denominator = Math.sqrt(model.reduce((sum, value) => sum + (value - mx) ** 2, 0) * gpr.reduce((sum, value) => sum + (value - my) ** 2, 0)); return denominator ? numerator / denominator : 0; })() : 0;
+  const eventDays = paired.filter((row) => row.aiGpr >= 1);
+  const hits = eventDays.filter((row) => row.model >= 0.6).length;
+  return <article className="mt-5 border border-slate-200 bg-slate-50/50 p-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><h3 className="font-semibold">收盘模型与 AI-GPR 回测对照</h3><p className="mt-1 text-xs leading-5 text-slate-500">两条线均为 Z-score。AI-GPR 只作为滞后研究标签，不是模型输入；统计衡量同步一致性，不代表收益或涨跌预测准确率。</p></div><div className="flex gap-2 text-xs"><span className="border border-slate-200 bg-white px-2 py-1">相关性 {correlation.toFixed(2)}</span><span className="border border-slate-200 bg-white px-2 py-1">GPR 事件日覆盖 {eventDays.length ? `${hits}/${eventDays.length}` : 'N/A'}</span></div></div><div className="mt-3 h-72"><ResponsiveContainer width="100%" height="100%"><LineChart data={data} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}><CartesianGrid stroke="#e2e8f0" vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} tick={{ fontSize: 11, fill: '#64748b' }} minTickGap={34} /><YAxis tick={{ fontSize: 11, fill: '#64748b' }} width={42} /><Tooltip labelFormatter={(label) => formatDate(String(label))} formatter={(value, name) => [Number(value).toFixed(2), name === 'model' ? '收盘风险模型' : 'AI-GPR 参考']} /><Line type="monotone" dataKey="model" name="model" stroke="#087e8b" strokeWidth={2.3} dot={false} /><Line type="monotone" dataKey="aiGpr" name="aiGpr" stroke="#c2410c" strokeWidth={2} strokeDasharray="6 4" dot={false} /><Brush dataKey="date" height={22} stroke="#087e8b" tickFormatter={() => ''} /></LineChart></ResponsiveContainer></div></article>;
 }

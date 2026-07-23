@@ -1,15 +1,18 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import * as XLSX from 'xlsx';
+import { unzipSync } from 'node:zlib';
 import type { RawFactors } from '@/lib/types';
 
 const AI_GPR_DAILY_URL = 'https://www.matteoiacoviello.com/ai_gpr_files/ai_gpr_data_daily.csv';
 const FRED_GRAPH_URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv';
 const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/SPY';
+const YAHOO_BRENT_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/BZ=F';
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const CBOE_SKEW_HISTORY_URL = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv';
 const REQUEST_TIMEOUT = 25_000;
 const GDELT_DOC_URL = 'https://api.gdeltproject.org/api/v2/doc/doc';
+const GDELT_LAST_UPDATE_URL = 'https://data.gdeltproject.org/gdeltv2/lastupdate.txt';
 const GOOGLE_NEWS_RSS_URL = 'https://news.google.com/rss/search';
 const GDELT_RISK_QUERY = '(war OR missile OR invasion OR sanction OR tariff OR nuclear OR "nuclear talks" OR terror OR blockade OR airstrike OR "military conflict")';
 const NEWS_QUERY = '(war OR missile OR invasion OR sanction OR tariff OR nuclear OR "nuclear talks" OR terror OR blockade OR airstrike OR "military conflict") when:1d';
@@ -26,7 +29,11 @@ export type HighFrequencyNews = {
   negativeRatio: number;
   comboDetected: boolean;
   asOf: string;
-  source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt';
+  source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events';
+};
+
+export type FreshMarketFactors = RawFactors & {
+  factorAsOf: { brent: string; correlation: string; vix: string; liquidity: string; sentiment: string };
 };
 
 let historyCache: { expiresAt: number; records: RawFactors[] } | null = null;
@@ -190,6 +197,30 @@ async function fetchSpyCloseSeries(startDate: string): Promise<NumericSeries> {
   return fetchFredSeries('SP500');
 }
 
+/** Brent futures close is the timely oil-market input; FRED's spot series is the published fallback. */
+async function fetchBrentCloseSeries(startDate: string): Promise<NumericSeries> {
+  const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
+  const period2 = Math.floor(Date.now() / 1000) + 86_400;
+  try {
+    const { data } = await axios.get<YahooResponse>(YAHOO_BRENT_CHART_URL, {
+      params: { period1, period2, interval: '1d', events: 'history' }, timeout: REQUEST_TIMEOUT,
+      headers: { 'User-Agent': 'Mozilla/5.0 (GeoRiskTerminal; data-research)' },
+    });
+    const result = data.chart?.result?.[0];
+    const timestamps = result?.timestamp ?? [];
+    const closes = result?.indicators?.quote?.[0]?.close ?? [];
+    const series: NumericSeries = new Map();
+    timestamps.forEach((timestamp, index) => {
+      const close = closes[index];
+      if (close !== null && close !== undefined && Number.isFinite(close)) series.set(new Date(timestamp * 1000).toISOString().slice(0, 10), close);
+    });
+    if (series.size) return series;
+  } catch (error) {
+    console.warn('[fetch] Yahoo Brent unavailable; using FRED DCOILBRENTEU fallback', error instanceof Error ? error.message : error);
+  }
+  return fetchFredSeries('DCOILBRENTEU');
+}
+
 function pearson(left: number[], right: number[]): number | null {
   if (left.length !== right.length || left.length < 2) return null;
   const meanLeft = left.reduce((sum, value) => sum + value, 0) / left.length;
@@ -207,9 +238,9 @@ function pearson(left: number[], right: number[]): number | null {
 export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
   if (historyCache && historyCache.expiresAt > Date.now()) return historyCache.records;
   const startDate = '2010-01-01';
-  const [aiCsv, vix, skew, dgs10, baa10y, spy] = await Promise.all([
+  const [aiCsv, vix, skew, dgs10, baa10y, spy, brent] = await Promise.all([
     axios.get<string>(AI_GPR_DAILY_URL, { timeout: REQUEST_TIMEOUT, responseType: 'text' }).then((response) => response.data),
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate),
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate),
   ]);
   const ai = parseAiGpr(aiCsv);
   const traditional = await (async () => {
@@ -223,18 +254,20 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
       return new Map<string, GprComponents>();
     }
   })();
-  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date)).sort();
+  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date) && brent.has(date)).sort();
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
   const observations: RawFactors[] = [];
   let previousSpy: number | null = null;
   let previousYield: number | null = null;
 
+  let lastGpr = 0;
   for (const date of dates) {
     const spyClose = spy.get(date)!;
     const yield10 = dgs10.get(date)!;
     const gprComponents = ai.get(date) ?? traditional.get(date);
-    if (!gprComponents || previousSpy === null || previousYield === null) {
+    if (gprComponents) lastGpr = 0.15 * gprComponents.total + 0.5 * gprComponents.threat + 0.35 * gprComponents.act;
+    if (previousSpy === null || previousYield === null) {
       previousSpy = spyClose;
       previousYield = yield10;
       continue;
@@ -248,7 +281,9 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
     if (correlation === null) continue;
     observations.push({
       date,
-      gpr: Number((0.15 * gprComponents.total + 0.5 * gprComponents.threat + 0.35 * gprComponents.act).toFixed(4)),
+      brent: Number(brent.get(date)!.toFixed(4)),
+      // Carry only the latest published reference after an AI-GPR release gap; it has zero score weight.
+      gpr: Number(lastGpr.toFixed(4)),
       correlation: Number(correlation.toFixed(6)),
       vix: vix.get(date)!,
       // BAA10Y is the published Baa-minus-10Y credit spread; convert percent to basis points for readability.
@@ -270,15 +305,22 @@ export async function fetchCurrentFactors(): Promise<RawFactors> {
 }
 
 /** Builds a current market snapshot independently of the slower published GPR/AI-GPR vintage. */
-export async function fetchFreshMarketFactors(gpr: number): Promise<RawFactors> {
+export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMarketFactors> {
   const startDate = '2010-01-01';
-  const [vix, skew, dgs10, baa10y, spy] = await Promise.all([
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate),
+  const [vix, skew, dgs10, baa10y, spy, brent] = await Promise.all([
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate),
   ]);
-  const dates = Array.from(vix.keys()).filter((date) => skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date)).sort();
-  const latestDate = dates.at(-1);
-  if (!latestDate) throw new Error('No common current market observation is available');
-  const lookbackDates = dates.slice(-21);
+  // Do not require a common date: SKEW and Baa spreads can publish after the futures market.
+  // Each component uses its own latest published value and exposes its as-of date to the UI.
+  const latestDate = (series: NumericSeries, label: string) => {
+    const date = Array.from(series.keys()).sort().at(-1);
+    if (!date) throw new Error(`${label} has no current observation`);
+    return date;
+  };
+  const correlationDates = Array.from(spy.keys()).filter((date) => dgs10.has(date)).sort();
+  const correlationDate = correlationDates.at(-1);
+  if (!correlationDate) throw new Error('SPY and DGS10 have no common current observation');
+  const lookbackDates = correlationDates.slice(-21);
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
   for (let index = 1; index < lookbackDates.length; index += 1) {
@@ -289,13 +331,20 @@ export async function fetchFreshMarketFactors(gpr: number): Promise<RawFactors> 
   }
   const correlation = pearson(stockReturns, bondReturns);
   if (correlation === null) throw new Error('Insufficient current market history for stock-bond correlation');
+  const factorAsOf = {
+    brent: latestDate(brent, 'Brent'), correlation: correlationDate, vix: latestDate(vix, 'VIX'),
+    liquidity: latestDate(baa10y, 'BAA10Y'), sentiment: latestDate(skew, 'SKEW'),
+  };
   return {
-    date: latestDate,
-    gpr,
+    // The displayed market date is the fastest tradable component; individual dates remain visible.
+    date: [factorAsOf.brent, factorAsOf.correlation, factorAsOf.vix].sort().at(-1)!,
+    brent: Number(brent.get(factorAsOf.brent)!.toFixed(4)),
+    gpr: gprReference,
     correlation: Number(correlation.toFixed(6)),
-    vix: vix.get(latestDate)!,
-    liquidity: Number((baa10y.get(latestDate)! * 100).toFixed(2)),
-    sentiment: skew.get(latestDate)!,
+    vix: vix.get(factorAsOf.vix)!,
+    liquidity: Number((baa10y.get(factorAsOf.liquidity)! * 100).toFixed(2)),
+    sentiment: skew.get(factorAsOf.sentiment)!,
+    factorAsOf,
   };
 }
 
@@ -355,6 +404,35 @@ async function fetchGdeltHeadlineSentiment(): Promise<{ negativeRatio: number; c
   const titles = (data.articles ?? []).map((article) => article.title?.trim() ?? '').filter(Boolean);
   if (titles.length < 3) throw new Error('GDELT article list returned insufficient headlines');
   return analyzeNewsTexts(titles);
+}
+
+/**
+ * Structured GDELT Event fallback. The latest Event export is published every 15 minutes;
+ * root CAMEO classes 18/19/20 capture assault, fighting and unconventional mass violence.
+ * Goldstein Scale filters to adverse interactions, so this is an event-intensity signal rather
+ * than a second copy of keyword headline volume.
+ */
+async function fetchGdeltEventConflictIntensity(): Promise<{ count: number; negativeRatio: number; comboDetected: boolean; asOf: string }> {
+  const { data: listing } = await axios.get<string>(GDELT_LAST_UPDATE_URL, { timeout: REQUEST_TIMEOUT, responseType: 'text' });
+  const eventUrl = listing.split(/\r?\n/).map((line) => line.trim().split(/\s+/).at(-1) ?? '').find((url) => /\.export\.CSV\.zip$/i.test(url));
+  if (!eventUrl) throw new Error('GDELT lastupdate did not contain an Event export URL');
+  const { data: archive } = await axios.get<ArrayBuffer>(eventUrl, { timeout: REQUEST_TIMEOUT, responseType: 'arraybuffer' });
+  const rows = unzipSync(Buffer.from(archive)).toString('utf8').trim().split(/\r?\n/);
+  let severeEvents = 0;
+  let adverseEvents = 0;
+  for (const row of rows) {
+    const columns = row.split('\t');
+    const rootCode = columns[28];
+    const goldstein = Number(columns[30]);
+    if (!Number.isFinite(goldstein) || goldstein >= 0) continue;
+    adverseEvents += 1;
+    if (rootCode === '18' || rootCode === '19' || rootCode === '20') severeEvents += 1;
+  }
+  if (!severeEvents) throw new Error('GDELT Event export contained no qualifying conflict events');
+  const stamp = eventUrl.match(/(\d{14})\.export/i)?.[1];
+  const asOf = stamp ? `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(8, 10)}:${stamp.slice(10, 12)}:${stamp.slice(12, 14)}Z` : new Date().toISOString();
+  // Convert one 15-minute bucket to a 24-hour comparable rate for the shared news calibration.
+  return { count: severeEvents * 96, negativeRatio: severeEvents / Math.max(adverseEvents, severeEvents), comboDetected: false, asOf };
 }
 
 function hasTerm(text: string, pattern: RegExp): boolean {
@@ -436,6 +514,9 @@ export async function fetchHighFrequencyNews(): Promise<HighFrequencyNews> {
     const sentiment = await fetchGdeltHeadlineSentiment().catch(() => null);
     return { count: gdelt.count, negativeRatio: sentiment?.negativeRatio ?? 0.5, comboDetected: sentiment?.comboDetected ?? false, asOf: gdelt.asOf, source: 'gdelt' };
   }
+
+  const gdeltEvents = await fetchGdeltEventConflictIntensity().catch(() => null);
+  if (gdeltEvents) return { ...gdeltEvents, source: 'gdelt_events' };
 
   // Only enter slower independent fallbacks after the primary high-frequency feed actually fails.
   const newsApi = await fetchNewsApiHeadlines().catch(() => null);
