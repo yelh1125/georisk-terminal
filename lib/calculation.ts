@@ -41,16 +41,17 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
     .filter((row) => row.date >= '2010-01-01' && row.date <= '2019-12-31')
     .map((row) => row.gpr);
   const factorZ = {} as FactorZ;
-  const goldOilChanges = history.slice(-257).map((row, index, values) => index < 5 ? null : row.goldOilRatio / values[index - 5].goldOilRatio - 1).filter((value): value is number => value !== null);
-  const currentGoldOilWindow = [...history.slice(-5), current];
-  const currentGoldOilChange = currentGoldOilWindow.length >= 6 ? current.goldOilRatio / currentGoldOilWindow[0].goldOilRatio - 1 : 0;
+  const validGoldOil = history.filter((row) => row.goldOilRatio > 0);
+  const goldOilChanges = validGoldOil.slice(-257).map((row, index, values) => index < 5 ? null : row.goldOilRatio / values[index - 5].goldOilRatio - 1).filter((value): value is number => value !== null);
+  const currentGoldOilWindow = [...validGoldOil.slice(-5), current];
+  const currentGoldOilChange = current.goldOilRatio > 0 && currentGoldOilWindow.length >= 6 && currentGoldOilWindow[0].goldOilRatio > 0 ? current.goldOilRatio / currentGoldOilWindow[0].goldOilRatio - 1 : 0;
 
   // Spread isolates cross-benchmark supply-risk pricing; it must not be labelled Brent-Dubai without a Dubai feed.
   factorZ.oilSpread = zScore(current.oilSpread, window.map((row) => row.oilSpread));
   // OVX is an option-implied crude-oil uncertainty measure, distinct from direction of oil prices.
   factorZ.oilIv = zScore(current.oilIv, window.map((row) => row.oilIv));
   // A rising Gold/Brent ratio over five sessions identifies flight-to-safety beyond an ordinary oil supply shock.
-  factorZ.goldOil = zScore(currentGoldOilChange, goldOilChanges);
+  factorZ.goldOil = current.goldOilRatio > 0 ? zScore(currentGoldOilChange, goldOilChanges) : 0;
   factorZ.brent = 0;
   // AI-GPR remains a labelled backtest reference, not a component of compositeScore.
   factorZ.gpr = zScore(current.gpr, gprBaseline.length >= 252 ? gprBaseline : window.map((row) => row.gpr));
@@ -60,10 +61,9 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
   factorZ.marketTransmission = 0.5 * correlationZ + 0.5 * vixZ;
 
   // Market-only close model = normalized weights of OilSpread, OVX, Gold/Oil, and market transmission.
-  const compositeScore = (Object.keys(FACTOR_WEIGHTS) as FactorName[]).reduce(
-    (sum, factor) => sum + FACTOR_WEIGHTS[factor] * factorZ[factor],
-    0,
-  );
+  const activeFactors = (Object.keys(FACTOR_WEIGHTS) as FactorName[]).filter((factor) => factor !== 'goldOil' || current.goldOilRatio > 0);
+  const activeWeight = activeFactors.reduce((sum, factor) => sum + FACTOR_WEIGHTS[factor], 0);
+  const compositeScore = activeFactors.reduce((sum, factor) => sum + FACTOR_WEIGHTS[factor] * factorZ[factor], 0) / activeWeight;
 
   return {
     ...current,

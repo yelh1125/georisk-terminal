@@ -78,7 +78,7 @@
 | `GET /api/risk/realtime` | 严格 JSON 实时风险快照，字段为 `calc_date`、`gpr_release_date`、`market_factors`、`news_pulse_z`、`market_score`、`risk_score`、`risk_level`、`action`、`news_trigger`、`comment` |
 | `POST /api/risk/update` | 触发抓取、计算、写库和缓存失效；设置 `CRON_SECRET` 后需请求头 `x-cron-secret` |
 
-抓取器使用 Yahoo Finance `BZ=F` 布伦特和 `GC=F` 黄金期货日收盘（不可用时分别回退至 FRED `DCOILBRENTEU` 和 `GOLDAMGBD228NLBM`）、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
+抓取器使用 Yahoo Finance `BZ=F` 布伦特和 `GC=F` 黄金期货日收盘（布伦特不可用时回退至 FRED `DCOILBRENTEU`；黄金行情受限时 Gold/Oil 作为可选增强因子自动排除并重新归一化）、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
 
 AI-GPR 是低频回测序列，而非当日观测：系统将 `gpr_release_date` 与 `calc_date` 分开输出，且它不参与实时得分。高频新闻同时统计文章计数与标题/摘要负面情感比例，关键词包括 `war`、`missile`、`invasion`、`sanction`、`tariff`、`blockade`、`airstrike` 与 `nuclear talks`。GDELT 提供主计数和文章标题情感；配置 `NEWS_API_KEY` 后 NewsAPI 是独立生产回退，Google News RSS 仅为无密钥备选。
 

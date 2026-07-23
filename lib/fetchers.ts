@@ -241,9 +241,9 @@ async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
     });
     if (series.size) return series;
   } catch (error) {
-    console.warn('[fetch] Yahoo gold unavailable; using FRED GOLDAMGBD228NLBM fallback', error instanceof Error ? error.message : error);
+    console.warn('[fetch] Yahoo gold unavailable; Gold/Oil factor will be excluded', error instanceof Error ? error.message : error);
   }
-  return fetchFredSeries('GOLDAMGBD228NLBM');
+  throw new Error('No server-accessible gold price fallback is currently available');
 }
 
 async function fetchWtiCloseSeries(startDate: string): Promise<NumericSeries> {
@@ -289,7 +289,7 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
   const [aiCsv, vix, skew, dgs10, baa10y, spy, brent, wti, oilIv, gold] = await Promise.all([
     axios.get<string>(AI_GPR_DAILY_URL, { timeout: REQUEST_TIMEOUT, responseType: 'text' }).then((response) => response.data),
     fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate),
-    fetchFredSeries('DCOILBRENTEU'), fetchFredSeries('DCOILWTICO'), fetchFredSeries('OVXCLS'), fetchFredSeries('GOLDAMGBD228NLBM'),
+    fetchFredSeries('DCOILBRENTEU'), fetchFredSeries('DCOILWTICO'), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate).catch((error) => { console.warn('[fetch] Gold/Oil factor unavailable; excluding it from this refresh', error instanceof Error ? error.message : error); return null; }),
   ]);
   const ai = parseAiGpr(aiCsv);
   const traditional = await (async () => {
@@ -303,7 +303,7 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
       return new Map<string, GprComponents>();
     }
   })();
-  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date) && brent.has(date) && wti.has(date) && oilIv.has(date) && gold.has(date)).sort();
+  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date) && brent.has(date) && wti.has(date) && oilIv.has(date)).sort();
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
   const observations: RawFactors[] = [];
@@ -333,7 +333,7 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
       brent: Number(brent.get(date)!.toFixed(4)),
       oilSpread: Number((brent.get(date)! - wti.get(date)!).toFixed(4)),
       oilIv: oilIv.get(date)!,
-      goldOilRatio: Number((gold.get(date)! / brent.get(date)!).toFixed(6)),
+      goldOilRatio: gold?.has(date) ? Number((gold.get(date)! / brent.get(date)!).toFixed(6)) : 0,
       // Carry only the latest published reference after an AI-GPR release gap; it has zero score weight.
       gpr: Number(lastGpr.toFixed(4)),
       correlation: Number(correlation.toFixed(6)),
@@ -360,7 +360,7 @@ export async function fetchCurrentFactors(): Promise<RawFactors> {
 export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMarketFactors> {
   const startDate = '2010-01-01';
   const [vix, skew, dgs10, baa10y, spy, brent, wti, oilIv, gold] = await Promise.all([
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate), fetchWtiCloseSeries(startDate), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate),
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate), fetchWtiCloseSeries(startDate), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate).catch((error) => { console.warn('[fetch] Gold/Oil factor unavailable; real-time score will re-normalize', error instanceof Error ? error.message : error); return null; }),
   ]);
   // Do not require a common date: SKEW and Baa spreads can publish after the futures market.
   // Each component uses its own latest published value and exposes its as-of date to the UI.
@@ -371,12 +371,12 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
   };
   const correlationDates = Array.from(spy.keys()).filter((date) => dgs10.has(date)).sort();
   const oilSpreadDates = Array.from(brent.keys()).filter((date) => wti.has(date)).sort();
-  const goldOilDates = Array.from(brent.keys()).filter((date) => gold.has(date)).sort();
+  const goldOilDates = gold ? Array.from(brent.keys()).filter((date) => gold.has(date)).sort() : [];
   const correlationDate = correlationDates.at(-1);
   if (!correlationDate) throw new Error('SPY and DGS10 have no common current observation');
   const oilSpreadDate = oilSpreadDates.at(-1);
   const goldOilDate = goldOilDates.at(-1);
-  if (!oilSpreadDate || !goldOilDate) throw new Error('Commodity series have no common current observation');
+  if (!oilSpreadDate) throw new Error('Brent and WTI have no common current observation');
   const lookbackDates = correlationDates.slice(-21);
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
@@ -389,16 +389,16 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
   const correlation = pearson(stockReturns, bondReturns);
   if (correlation === null) throw new Error('Insufficient current market history for stock-bond correlation');
   const factorAsOf = {
-    brent: latestDate(brent, 'Brent'), oilSpread: oilSpreadDate, oilIv: latestDate(oilIv, 'OVX'), goldOil: goldOilDate, correlation: correlationDate, vix: latestDate(vix, 'VIX'),
+    brent: latestDate(brent, 'Brent'), oilSpread: oilSpreadDate, oilIv: latestDate(oilIv, 'OVX'), goldOil: goldOilDate ?? 'unavailable', correlation: correlationDate, vix: latestDate(vix, 'VIX'),
     liquidity: latestDate(baa10y, 'BAA10Y'), sentiment: latestDate(skew, 'SKEW'),
   };
   return {
     // The displayed market date is the fastest tradable component; individual dates remain visible.
-    date: [factorAsOf.brent, factorAsOf.oilSpread, factorAsOf.oilIv, factorAsOf.goldOil, factorAsOf.correlation, factorAsOf.vix].sort().at(-1)!,
+    date: [factorAsOf.brent, factorAsOf.oilSpread, factorAsOf.oilIv, factorAsOf.correlation, factorAsOf.vix].sort().at(-1)!,
     brent: Number(brent.get(factorAsOf.brent)!.toFixed(4)),
     oilSpread: Number((brent.get(oilSpreadDate)! - wti.get(oilSpreadDate)!).toFixed(4)),
     oilIv: oilIv.get(factorAsOf.oilIv)!,
-    goldOilRatio: Number((gold.get(goldOilDate)! / brent.get(goldOilDate)!).toFixed(6)),
+    goldOilRatio: gold && goldOilDate ? Number((gold.get(goldOilDate)! / brent.get(goldOilDate)!).toFixed(6)) : 0,
     gpr: gprReference,
     correlation: Number(correlation.toFixed(6)),
     vix: vix.get(factorAsOf.vix)!,

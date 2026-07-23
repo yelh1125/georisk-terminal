@@ -142,15 +142,21 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
   if (!newsResult) gprSource = 'ESTIMATED';
   const marketFactors = calculateRiskRecord(history, marketRaw);
   const newsPulseZ = clip(newsResult?.pulseZ ?? (lastKnown?.pulseZ ?? 0) * 0.75, 0, 3);
-  // AI-GPR has zero score weight. Live score gives 35% to the independently updated conflict-news pulse.
-  const marketScore = 0.35 * newsPulseZ + 0.25 * marketFactors.oilSpreadZ + 0.15 * marketFactors.oilIvZ + 0.15 * marketFactors.goldOilZ + 0.10 * marketFactors.marketTransmissionZ;
+  // AI-GPR has zero score weight. If the independent gold feed is unavailable, re-normalize
+  // remaining real observations rather than inventing a Gold/Oil value or failing the whole API.
+  const liveTerms = [
+    { weight: 0.35, value: newsPulseZ }, { weight: 0.25, value: marketFactors.oilSpreadZ },
+    { weight: 0.15, value: marketFactors.oilIvZ }, { weight: 0.10, value: marketFactors.marketTransmissionZ },
+    ...(marketRaw.goldOilRatio > 0 ? [{ weight: 0.15, value: marketFactors.goldOilZ }] : []),
+  ];
+  const marketScore = liveTerms.reduce((sum, term) => sum + term.weight * term.value, 0) / liveTerms.reduce((sum, term) => sum + term.weight, 0);
   const riskScore = marketScore;
   const riskLevel = chineseRiskLevel(riskScore);
   const action = actionFor(riskScore, newsPulseZ);
   const newsComment = newsResult
     ? `${newsResult.source === 'gdelt_newsapi' ? 'GDELT 计数与 NewsAPI 情感' : newsResult.source === 'newsapi' ? 'NewsAPI 计数与情感' : newsResult.source === 'gdelt_google' ? 'GDELT 计数与 Google News 情感' : newsResult.source === 'google_rss' ? 'Google News RSS 计数与情感' : 'GDELT 计数'}驱动新闻脉冲 ${newsPulseZ.toFixed(2)}Z${newsResult.comboBoost ? '，制裁+关税+军事行动组合拳加成 +0.50' : ''}`
     : '两路高频新闻源暂不可用，沿用衰减后的上一期新闻脉冲 [ESTIMATED]';
-  const lagComment = lagDays > 5 ? `AI-GPR滞后${lagDays}天，仅用于回测对照，权重为 0%。` : 'AI-GPR仅用于回测对照，权重为 0%。';
+  const lagComment = `${lagDays > 5 ? `AI-GPR滞后${lagDays}天，` : ''}AI-GPR仅用于回测对照，权重为 0%。${marketRaw.goldOilRatio > 0 ? '' : ' Gold/Oil 数据源不可用，实时权重已在可用因子间重新归一化。'}`;
   const snapshot: RealtimeRiskSnapshot = {
     calc_date: calcDate,
     gpr_release_date: latestPublished.date,
