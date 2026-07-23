@@ -1,6 +1,6 @@
 # GeoRisk Terminal
 
-一个基于 Next.js 的地缘政治风险监测与策略信号仪表盘。收盘模型只使用可及时取得的市场数据：布伦特原油冲击、波动率、相关性机制、流动性和期权情绪；传统 GPR/AI-GPR 仅作为独立的滞后回测基准。
+一个基于 Next.js 的地缘政治风险监测与策略信号仪表盘。模型使用可及时取得的市场数据：Brent-WTI 跨基准供给风险价差、原油隐含波动率、Gold/Oil 避险背离和市场传导；传统 GPR/AI-GPR 仅作为独立的滞后回测基准。
 
 ## 项目结构
 
@@ -66,9 +66,9 @@
 
 ## 数据、模型与接口
 
-收盘五因子权重为布伦特原油五日冲击 `0.30`、相关性机制 `0.25`、VIX `0.20`、流动性压力 `0.15`、期权情绪 `0.10`。布伦特因子使用五日收益的 252 个交易日 Z-score，避免把长期油价水平误读成事件风险；相关性使用五年滚动基线，其余因子使用过去 252 个观测日的 Z-score。得分阈值为低风险 `<0.3`、中风险 `0.3-0.6`、高风险 `0.6-0.8`、极高风险 `>0.8`。AI-GPR/GPR 权重固定为 `0%`，只用于对照回测曲线。公式和实现说明见 `lib/calculation.ts` 内联注释。
+实时五因子权重为 GDELT 新闻脉冲 `0.35`、Brent-WTI 价差 `0.25`、原油隐含波动率 OVX `0.15`、Gold/Oil 五日变化 `0.15`、市场传导 `0.10`（VIX 与股债相关性各占一半）。没有 15 分钟新闻历史的收盘回测将其余四项重新归一化。Brent-WTI 是免费跨基准供给风险代理，不等同于真正的 Brent-Dubai/Oman 实货价差；若接入授权 Dubai/Oman 现货源，可在同一字段替换。得分阈值为低风险 `<0.3`、中风险 `0.3-0.6`、高风险 `0.6-0.8`、极高风险 `>0.8`。AI-GPR/GPR 权重固定为 `0%`，只用于对照回测曲线。
 
-仪表盘的“因子历史与模型说明”工作区支持点击多选布伦特原油、VIX、相关性、流动性与期权情绪，切换 `30/90/365` 日、折线/柱状图和原始值/Z-score 视图。末尾的“收盘模型与 AI-GPR 回测对照”以标准化曲线、相关性和 AI-GPR 事件日覆盖率展示一致性；它不是收益预测准确率。
+仪表盘的“因子历史与模型说明”工作区支持点击多选 Brent-WTI 价差、OVX、Gold/Oil、VIX 与股债相关性，切换 `30/90/365` 日、折线/柱状图和原始值/Z-score 视图。末尾的“收盘模型与 AI-GPR 回测对照”以标准化曲线、相关性和 AI-GPR 事件日覆盖率展示一致性；它不是收益预测准确率。
 
 | Endpoint | Description |
 | --- | --- |
@@ -78,11 +78,11 @@
 | `GET /api/risk/realtime` | 严格 JSON 实时风险快照，字段为 `calc_date`、`gpr_release_date`、`market_factors`、`news_pulse_z`、`market_score`、`risk_score`、`risk_level`、`action`、`news_trigger`、`comment` |
 | `POST /api/risk/update` | 触发抓取、计算、写库和缓存失效；设置 `CRON_SECRET` 后需请求头 `x-cron-secret` |
 
-抓取器使用 Yahoo Finance `BZ=F` 布伦特期货日收盘（不可用时回退至 FRED `DCOILBRENTEU`）、FRED `VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
+抓取器使用 Yahoo Finance `BZ=F` 布伦特和 `GC=F` 黄金期货日收盘（不可用时分别回退至 FRED `DCOILBRENTEU` 和 `GOLDAMGBD228NLBM`）、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
 
 AI-GPR 是低频回测序列，而非当日观测：系统将 `gpr_release_date` 与 `calc_date` 分开输出，且它不参与实时得分。高频新闻同时统计文章计数与标题/摘要负面情感比例，关键词包括 `war`、`missile`、`invasion`、`sanction`、`tariff`、`blockade`、`airstrike` 与 `nuclear talks`。GDELT 提供主计数和文章标题情感；配置 `NEWS_API_KEY` 后 NewsAPI 是独立生产回退，Google News RSS 仅为无密钥备选。
 
-实时风险得分为 `0.20 BrentShock_Z + 0.30 NewsPulse_Z + 0.20 rho_eq_bond_Z + 0.15 VIX_Z + 0.10 BAA10Y_Z + 0.05 SKEW_Z`。`NewsPulse_Z = clip(0.60 Count_Z + 0.40 NegativeSentiment_Z + ComboBoost, 0, 3)`；若同时检测到制裁/封锁、关税/贸易战和军事行动，`ComboBoost = +0.50`。记忆状态为 `max(当前脉冲, 0.75 x 上一期脉冲)`，因此冲突未决时风险不会立即归零。GDELT DOC 限流时，系统直接下载最新的 GDELT 2.0 Event 15 分钟导出文件，并以 CAMEO 18/19/20 的负向事件强度继续计算脉冲。市场因子不再强制同日对齐；接口单独披露每项的 `asOf` 日期。新闻脉冲超过 `1.20` 提高对冲，超过 `2.00` 进入强对冲审查。两路实时新闻均不可用时，系统保留衰减后的上一期状态并以 `ESTIMATED` 明示。系统只报告当前风险温度，不预测价格方向。
+实时风险得分为 `0.35 NewsPulse_Z + 0.25 OilSpread_Z + 0.15 OilIV_Z + 0.15 GoldOil_Z + 0.10 MarketTransmission_Z`，其中 `MarketTransmission_Z = 0.5 VIX_Z + 0.5 rho_eq_bond_Z`。`NewsPulse_Z = clip(0.60 Count_Z + 0.40 NegativeSentiment_Z + ComboBoost, 0, 3)`；若同时检测到制裁/封锁、关税/贸易战和军事行动，`ComboBoost = +0.50`。记忆状态为 `max(当前脉冲, 0.75 x 上一期脉冲)`，因此冲突未决时风险不会立即归零。GDELT DOC 限流时，系统直接下载最新的 GDELT 2.0 Event 15 分钟导出文件，并以 CAMEO 18/19/20 的负向事件强度继续计算脉冲。市场因子不再强制同日对齐；接口单独披露每项的 `asOf` 日期。新闻脉冲超过 `1.20` 提高对冲，超过 `2.00` 进入强对冲审查。两路实时新闻均不可用时，系统保留衰减后的上一期状态并以 `ESTIMATED` 明示。系统只报告当前风险温度，不预测价格方向。
 
 ## 定时与部署
 

@@ -8,6 +8,8 @@ const AI_GPR_DAILY_URL = 'https://www.matteoiacoviello.com/ai_gpr_files/ai_gpr_d
 const FRED_GRAPH_URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv';
 const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/SPY';
 const YAHOO_BRENT_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/BZ=F';
+const YAHOO_GOLD_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/GC=F';
+const YAHOO_WTI_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/CL=F';
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const CBOE_SKEW_HISTORY_URL = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv';
 const REQUEST_TIMEOUT = 25_000;
@@ -33,7 +35,7 @@ export type HighFrequencyNews = {
 };
 
 export type FreshMarketFactors = RawFactors & {
-  factorAsOf: { brent: string; correlation: string; vix: string; liquidity: string; sentiment: string };
+  factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
 };
 
 let historyCache: { expiresAt: number; records: RawFactors[] } | null = null;
@@ -221,6 +223,52 @@ async function fetchBrentCloseSeries(startDate: string): Promise<NumericSeries> 
   return fetchFredSeries('DCOILBRENTEU');
 }
 
+async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
+  const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
+  const period2 = Math.floor(Date.now() / 1000) + 86_400;
+  try {
+    const { data } = await axios.get<YahooResponse>(YAHOO_GOLD_CHART_URL, {
+      params: { period1, period2, interval: '1d', events: 'history' }, timeout: REQUEST_TIMEOUT,
+      headers: { 'User-Agent': 'Mozilla/5.0 (GeoRiskTerminal; data-research)' },
+    });
+    const result = data.chart?.result?.[0];
+    const timestamps = result?.timestamp ?? [];
+    const closes = result?.indicators?.quote?.[0]?.close ?? [];
+    const series: NumericSeries = new Map();
+    timestamps.forEach((timestamp, index) => {
+      const close = closes[index];
+      if (close !== null && close !== undefined && Number.isFinite(close)) series.set(new Date(timestamp * 1000).toISOString().slice(0, 10), close);
+    });
+    if (series.size) return series;
+  } catch (error) {
+    console.warn('[fetch] Yahoo gold unavailable; using FRED GOLDAMGBD228NLBM fallback', error instanceof Error ? error.message : error);
+  }
+  return fetchFredSeries('GOLDAMGBD228NLBM');
+}
+
+async function fetchWtiCloseSeries(startDate: string): Promise<NumericSeries> {
+  const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
+  const period2 = Math.floor(Date.now() / 1000) + 86_400;
+  try {
+    const { data } = await axios.get<YahooResponse>(YAHOO_WTI_CHART_URL, {
+      params: { period1, period2, interval: '1d', events: 'history' }, timeout: REQUEST_TIMEOUT,
+      headers: { 'User-Agent': 'Mozilla/5.0 (GeoRiskTerminal; data-research)' },
+    });
+    const result = data.chart?.result?.[0];
+    const timestamps = result?.timestamp ?? [];
+    const closes = result?.indicators?.quote?.[0]?.close ?? [];
+    const series: NumericSeries = new Map();
+    timestamps.forEach((timestamp, index) => {
+      const close = closes[index];
+      if (close !== null && close !== undefined && Number.isFinite(close)) series.set(new Date(timestamp * 1000).toISOString().slice(0, 10), close);
+    });
+    if (series.size) return series;
+  } catch (error) {
+    console.warn('[fetch] Yahoo WTI unavailable; using FRED DCOILWTICO fallback', error instanceof Error ? error.message : error);
+  }
+  return fetchFredSeries('DCOILWTICO');
+}
+
 function pearson(left: number[], right: number[]): number | null {
   if (left.length !== right.length || left.length < 2) return null;
   const meanLeft = left.reduce((sum, value) => sum + value, 0) / left.length;
@@ -238,9 +286,10 @@ function pearson(left: number[], right: number[]): number | null {
 export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
   if (historyCache && historyCache.expiresAt > Date.now()) return historyCache.records;
   const startDate = '2010-01-01';
-  const [aiCsv, vix, skew, dgs10, baa10y, spy, brent] = await Promise.all([
+  const [aiCsv, vix, skew, dgs10, baa10y, spy, brent, wti, oilIv, gold] = await Promise.all([
     axios.get<string>(AI_GPR_DAILY_URL, { timeout: REQUEST_TIMEOUT, responseType: 'text' }).then((response) => response.data),
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate),
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate),
+    fetchFredSeries('DCOILBRENTEU'), fetchFredSeries('DCOILWTICO'), fetchFredSeries('OVXCLS'), fetchFredSeries('GOLDAMGBD228NLBM'),
   ]);
   const ai = parseAiGpr(aiCsv);
   const traditional = await (async () => {
@@ -254,7 +303,7 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
       return new Map<string, GprComponents>();
     }
   })();
-  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date) && brent.has(date)).sort();
+  const dates = Array.from(vix.keys()).filter((date) => date >= startDate && skew.has(date) && dgs10.has(date) && baa10y.has(date) && spy.has(date) && brent.has(date) && wti.has(date) && oilIv.has(date) && gold.has(date)).sort();
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
   const observations: RawFactors[] = [];
@@ -282,6 +331,9 @@ export async function fetchRealFactorHistory(): Promise<RawFactors[]> {
     observations.push({
       date,
       brent: Number(brent.get(date)!.toFixed(4)),
+      oilSpread: Number((brent.get(date)! - wti.get(date)!).toFixed(4)),
+      oilIv: oilIv.get(date)!,
+      goldOilRatio: Number((gold.get(date)! / brent.get(date)!).toFixed(6)),
       // Carry only the latest published reference after an AI-GPR release gap; it has zero score weight.
       gpr: Number(lastGpr.toFixed(4)),
       correlation: Number(correlation.toFixed(6)),
@@ -307,8 +359,8 @@ export async function fetchCurrentFactors(): Promise<RawFactors> {
 /** Builds a current market snapshot independently of the slower published GPR/AI-GPR vintage. */
 export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMarketFactors> {
   const startDate = '2010-01-01';
-  const [vix, skew, dgs10, baa10y, spy, brent] = await Promise.all([
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate),
+  const [vix, skew, dgs10, baa10y, spy, brent, wti, oilIv, gold] = await Promise.all([
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate), fetchWtiCloseSeries(startDate), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate),
   ]);
   // Do not require a common date: SKEW and Baa spreads can publish after the futures market.
   // Each component uses its own latest published value and exposes its as-of date to the UI.
@@ -318,8 +370,13 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
     return date;
   };
   const correlationDates = Array.from(spy.keys()).filter((date) => dgs10.has(date)).sort();
+  const oilSpreadDates = Array.from(brent.keys()).filter((date) => wti.has(date)).sort();
+  const goldOilDates = Array.from(brent.keys()).filter((date) => gold.has(date)).sort();
   const correlationDate = correlationDates.at(-1);
   if (!correlationDate) throw new Error('SPY and DGS10 have no common current observation');
+  const oilSpreadDate = oilSpreadDates.at(-1);
+  const goldOilDate = goldOilDates.at(-1);
+  if (!oilSpreadDate || !goldOilDate) throw new Error('Commodity series have no common current observation');
   const lookbackDates = correlationDates.slice(-21);
   const stockReturns: number[] = [];
   const bondReturns: number[] = [];
@@ -332,13 +389,16 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
   const correlation = pearson(stockReturns, bondReturns);
   if (correlation === null) throw new Error('Insufficient current market history for stock-bond correlation');
   const factorAsOf = {
-    brent: latestDate(brent, 'Brent'), correlation: correlationDate, vix: latestDate(vix, 'VIX'),
+    brent: latestDate(brent, 'Brent'), oilSpread: oilSpreadDate, oilIv: latestDate(oilIv, 'OVX'), goldOil: goldOilDate, correlation: correlationDate, vix: latestDate(vix, 'VIX'),
     liquidity: latestDate(baa10y, 'BAA10Y'), sentiment: latestDate(skew, 'SKEW'),
   };
   return {
     // The displayed market date is the fastest tradable component; individual dates remain visible.
-    date: [factorAsOf.brent, factorAsOf.correlation, factorAsOf.vix].sort().at(-1)!,
+    date: [factorAsOf.brent, factorAsOf.oilSpread, factorAsOf.oilIv, factorAsOf.goldOil, factorAsOf.correlation, factorAsOf.vix].sort().at(-1)!,
     brent: Number(brent.get(factorAsOf.brent)!.toFixed(4)),
+    oilSpread: Number((brent.get(oilSpreadDate)! - wti.get(oilSpreadDate)!).toFixed(4)),
+    oilIv: oilIv.get(factorAsOf.oilIv)!,
+    goldOilRatio: Number((gold.get(goldOilDate)! / brent.get(goldOilDate)!).toFixed(6)),
     gpr: gprReference,
     correlation: Number(correlation.toFixed(6)),
     vix: vix.get(factorAsOf.vix)!,

@@ -1,15 +1,14 @@
 import type { RawFactors, RiskLevel, RiskRecord, StrategySignal } from '@/lib/types';
 
 export const FACTOR_WEIGHTS = {
-  brent: 0.3,
-  correlation: 0.25,
-  vix: 0.2,
-  liquidity: 0.15,
-  sentiment: 0.1,
+  oilSpread: 0.3846,
+  oilIv: 0.2308,
+  goldOil: 0.2308,
+  marketTransmission: 0.1538,
 } as const;
 
 type FactorName = keyof typeof FACTOR_WEIGHTS;
-type FactorZ = Record<FactorName | 'gpr', number>;
+type FactorZ = Record<FactorName | 'gpr' | 'brent', number>;
 
 const round = (value: number, precision = 3) => Number(value.toFixed(precision));
 
@@ -30,8 +29,9 @@ export function getRiskLevel(score: number): RiskLevel {
 }
 
 /**
- * Daily-close market model. AI-GPR is deliberately excluded because its release lag makes
- * it unsuitable as a same-day trading input. The five weights total 1.00.
+ * Market-only close model. AI-GPR is deliberately excluded because its release lag makes
+ * it unsuitable as a same-day trading input. It re-normalizes the four market components
+ * to 1.00 because the 35% high-frequency news factor is not available historically.
  * The linear factor form follows Grinold & Kahn, Active Portfolio Management.
  */
 export function calculateRiskRecord(history: RawFactors[], current: RawFactors): RiskRecord {
@@ -41,21 +41,25 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
     .filter((row) => row.date >= '2010-01-01' && row.date <= '2019-12-31')
     .map((row) => row.gpr);
   const factorZ = {} as FactorZ;
-  const brentReturns = history.slice(-257).map((row, index, values) => index < 5 ? null : row.brent / values[index - 5].brent - 1).filter((value): value is number => value !== null);
-  const currentBrentWindow = [...history.slice(-5), current];
-  const currentBrentReturn = currentBrentWindow.length >= 6 ? current.brent / currentBrentWindow[0].brent - 1 : 0;
+  const goldOilChanges = history.slice(-257).map((row, index, values) => index < 5 ? null : row.goldOilRatio / values[index - 5].goldOilRatio - 1).filter((value): value is number => value !== null);
+  const currentGoldOilWindow = [...history.slice(-5), current];
+  const currentGoldOilChange = currentGoldOilWindow.length >= 6 ? current.goldOilRatio / currentGoldOilWindow[0].goldOilRatio - 1 : 0;
 
-  // Brent 5-session return captures an oil-market shock, rather than treating a high price level as risk by itself.
-  factorZ.brent = zScore(currentBrentReturn, brentReturns);
+  // Spread isolates cross-benchmark supply-risk pricing; it must not be labelled Brent-Dubai without a Dubai feed.
+  factorZ.oilSpread = zScore(current.oilSpread, window.map((row) => row.oilSpread));
+  // OVX is an option-implied crude-oil uncertainty measure, distinct from direction of oil prices.
+  factorZ.oilIv = zScore(current.oilIv, window.map((row) => row.oilIv));
+  // A rising Gold/Brent ratio over five sessions identifies flight-to-safety beyond an ordinary oil supply shock.
+  factorZ.goldOil = zScore(currentGoldOilChange, goldOilChanges);
+  factorZ.brent = 0;
   // AI-GPR remains a labelled backtest reference, not a component of compositeScore.
   factorZ.gpr = zScore(current.gpr, gprBaseline.length >= 252 ? gprBaseline : window.map((row) => row.gpr));
   // Stock-bond correlation is a regime signal, so its Z-score uses a five-year reference window.
-  factorZ.correlation = zScore(current.correlation, correlationWindow.map((row) => row.correlation));
-  factorZ.vix = zScore(current.vix, window.map((row) => row.vix));
-  factorZ.liquidity = zScore(current.liquidity, window.map((row) => row.liquidity));
-  factorZ.sentiment = zScore(current.sentiment, window.map((row) => row.sentiment));
+  const correlationZ = zScore(current.correlation, correlationWindow.map((row) => row.correlation));
+  const vixZ = zScore(current.vix, window.map((row) => row.vix));
+  factorZ.marketTransmission = 0.5 * correlationZ + 0.5 * vixZ;
 
-  // Close model = 0.30 BrentShock_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 SKEW_Z.
+  // Market-only close model = normalized weights of OilSpread, OVX, Gold/Oil, and market transmission.
   const compositeScore = (Object.keys(FACTOR_WEIGHTS) as FactorName[]).reduce(
     (sum, factor) => sum + FACTOR_WEIGHTS[factor] * factorZ[factor],
     0,
@@ -63,37 +67,41 @@ export function calculateRiskRecord(history: RawFactors[], current: RawFactors):
 
   return {
     ...current,
-    brentZ: round(factorZ.brent),
+    brentZ: 0,
+    oilSpreadZ: round(factorZ.oilSpread),
+    oilIvZ: round(factorZ.oilIv),
+    goldOilZ: round(factorZ.goldOil),
+    marketTransmissionZ: round(factorZ.marketTransmission),
     gprZ: round(factorZ.gpr),
-    correlationZ: round(factorZ.correlation),
-    vixZ: round(factorZ.vix),
-    liquidityZ: round(factorZ.liquidity),
-    sentimentZ: round(factorZ.sentiment),
+    correlationZ: round(correlationZ),
+    vixZ: round(vixZ),
+    liquidityZ: round(zScore(current.liquidity, window.map((row) => row.liquidity))),
+    sentimentZ: round(zScore(current.sentiment, window.map((row) => row.sentiment))),
     compositeScore: round(compositeScore),
     riskLevel: getRiskLevel(compositeScore),
   };
 }
 
 /** A 20-session breakout is the Donchian-channel rule popularized by trend-following systems (Turtle Trading rules). */
-export function isBrentBreakout(history: RawFactors[], currentBrent: number): boolean {
-  const prior20 = history.slice(-20).map((row) => row.brent);
-  return prior20.length === 20 && currentBrent > Math.max(...prior20);
+export function isOilSpreadBreakout(history: RawFactors[], currentSpread: number): boolean {
+  const prior20 = history.slice(-20).map((row) => row.oilSpread);
+  return prior20.length === 20 && currentSpread > Math.max(...prior20);
 }
 
 export function determineStrategy(history: RiskRecord[], latest: RiskRecord): StrategySignal {
-  const rawHistory = history.map(({ date, brent, gpr, correlation, vix, liquidity, sentiment }) => ({
-    date, brent, gpr, correlation, vix, liquidity, sentiment,
+  const rawHistory = history.map(({ date, brent, oilSpread, oilIv, goldOilRatio, gpr, correlation, vix, liquidity, sentiment }) => ({
+    date, brent, oilSpread, oilIv, goldOilRatio, gpr, correlation, vix, liquidity, sentiment,
   }));
   const vixFalling = history.length > 1 && latest.vix < history.at(-2)!.vix;
 
-  if (latest.compositeScore > 0.6 && isBrentBreakout(rawHistory.slice(0, -1), latest.brent)) {
+  if (latest.compositeScore > 0.6 && isOilSpreadBreakout(rawHistory.slice(0, -1), latest.oilSpread)) {
     return {
       type: 'RISK_ON_HEDGE',
       strength: latest.compositeScore > 0.8 ? 'STRONG' : 'LIGHT',
       title: latest.compositeScore > 0.8 ? '极高地缘风险：重仓对冲' : '高地缘风险：轻仓试错',
       recommendation: latest.compositeScore > 0.8
         ? '建议增配黄金 ETF 20%，配置原油与国防股，同时减持航空和高估值成长股。'
-        : '布伦特原油突破 20 日高点，可小仓位做多黄金、能源和国防股，设置严格止损。',
+        : 'Brent-WTI 供给风险价差突破 20 日高点，可小仓位做多黄金、能源和国防股，设置严格止损。',
     };
   }
 

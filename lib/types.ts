@@ -4,6 +4,12 @@ export interface RawFactors {
   date: string;
   /** Brent front-month settlement / latest available close in USD per barrel. */
   brent: number;
+  /** Brent minus WTI cross-benchmark spread, USD per barrel. This is not Dubai crude. */
+  oilSpread: number;
+  /** CBOE OVX, the implied-volatility index for the USO crude-oil ETF. */
+  oilIv: number;
+  /** Gold price divided by Brent price, used as a flight-to-safety regime ratio. */
+  goldOilRatio: number;
   /** Published academic reference only. It never contributes to the live score. */
   gpr: number;
   correlation: number;
@@ -14,6 +20,10 @@ export interface RawFactors {
 
 export interface RiskRecord extends RawFactors {
   brentZ: number;
+  oilSpreadZ: number;
+  oilIvZ: number;
+  goldOilZ: number;
+  marketTransmissionZ: number;
   gprZ: number;
   correlationZ: number;
   vixZ: number;
@@ -44,7 +54,7 @@ export interface NowcastResponse {
   marketAsOf: string;
   brentAsOf: string;
   brentClose: number;
-  factorAsOf: { brent: string; correlation: string; vix: string; liquidity: string; sentiment: string };
+  factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
   gprAsOf: string;
   newsAsOf: string;
   newsPulseZ: number;
@@ -60,7 +70,10 @@ export interface RealtimeRiskSnapshot {
   calc_date: string;
   gpr_release_date: string;
   market_factors: {
-    brent_z: number;
+    oil_spread_z: number;
+    oil_iv_z: number;
+    gold_oil_z: number;
+    market_transmission_z: number;
     rho_eq_bond_z: number;
     vix_z: number;
     baa10y_z: number;

@@ -11,8 +11,15 @@ model DailyRiskData {
   id                 String   @id @default(cuid())
   date               DateTime @unique @db.Date
   brent              Float
+  oilSpread          Float
+  oilIv              Float
+  goldOilRatio       Float
   gpr                Float
   brentZ             Float
+  oilSpreadZ         Float
+  oilIvZ             Float
+  goldOilZ           Float
+  marketTransmissionZ Float
   correlation        Float
   vix                Float
   liquidity          Float

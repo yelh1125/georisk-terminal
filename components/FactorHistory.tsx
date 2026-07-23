@@ -6,9 +6,9 @@ import {
 } from 'recharts';
 import type { RiskRecord } from '@/lib/types';
 
-type FactorId = 'brent' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
-type MetricKey = 'brent' | 'vix' | 'correlation' | 'liquidity' | 'sentiment';
-type ZKey = 'brentZ' | 'vixZ' | 'correlationZ' | 'liquidityZ' | 'sentimentZ';
+type FactorId = 'oilSpread' | 'oilIv' | 'goldOil' | 'vix' | 'correlation';
+type MetricKey = 'oilSpread' | 'oilIv' | 'goldOilRatio' | 'vix' | 'correlation';
+type ZKey = 'oilSpreadZ' | 'oilIvZ' | 'goldOilZ' | 'vixZ' | 'correlationZ';
 
 type FactorDefinition = {
   id: FactorId;
@@ -27,39 +27,39 @@ type FactorDefinition = {
 
 const FACTORS: FactorDefinition[] = [
   {
-    id: 'brent', label: '布伦特原油冲击', shortLabel: 'Brent 原油', valueKey: 'brent', zKey: 'brentZ', unit: 'USD/bbl', color: '#c2410c', activeClass: 'border-orange-700 bg-orange-700 text-white',
-    source: 'Yahoo Finance BZ=F 日线收盘；不可用时回退至 FRED DCOILBRENTEU 布伦特现货价格。',
-    definition: '能源供给中断、航运风险和制裁升级会优先反映在布伦特油价；模型使用冲击而非静态价格水平。',
-    formula: 'BrentShock = Z(Brent_t / Brent_t-5 - 1, 252 个交易日)。',
-    weight: '30%',
+    id: 'oilSpread', label: 'Brent-WTI 供给风险价差', shortLabel: 'Brent-WTI 价差', valueKey: 'oilSpread', zKey: 'oilSpreadZ', unit: 'USD/bbl', color: '#c2410c', activeClass: 'border-orange-700 bg-orange-700 text-white',
+    source: 'FRED DCOILBRENTEU 与 DCOILWTICO；实时布伦特优先 Yahoo Finance BZ=F。该免费代理不是 Dubai/Oman 现货。',
+    definition: '跨基准油价差扩张可反映国际海运、制裁和非美供给链风险溢价；不能等同于真正的 Brent-Dubai 现货差。',
+    formula: 'OilSpread = Brent - WTI；OilSpread_Z = Z(OilSpread, 252 个交易日)。',
+    weight: '25% 实时 / 38.5% 无新闻收盘模型',
   },
   {
-    id: 'vix', label: '市场波动率', shortLabel: 'VIX', valueKey: 'vix', zKey: 'vixZ', unit: 'index', color: '#087e8b', activeClass: 'border-teal bg-teal text-white',
+    id: 'oilIv', label: '原油隐含波动率', shortLabel: 'Oil IV (OVX)', valueKey: 'oilIv', zKey: 'oilIvZ', unit: 'index', color: '#7c3aed', activeClass: 'border-violet-600 bg-violet-600 text-white',
+    source: 'FRED OVXCLS（CBOE Crude Oil ETF Volatility Index）。',
+    definition: '原油期权市场对未来不确定性的定价，独立于油价方向。',
+    formula: 'OilIV_Z = Z(OVXCLS, 252 个交易日)。',
+    weight: '15% 实时 / 23.1% 无新闻收盘模型',
+  },
+  {
+    id: 'goldOil', label: '黄金/原油避险背离', shortLabel: 'Gold/Oil', valueKey: 'goldOilRatio', zKey: 'goldOilZ', unit: 'ratio', color: '#ca8a04', activeClass: 'border-yellow-600 bg-yellow-600 text-white',
+    source: 'Yahoo Finance GC=F 与 BZ=F；历史回退为 FRED GOLDAMGBD228NLBM 与 DCOILBRENTEU。',
+    definition: '黄金相对原油的五日比率上升，用于识别避险资金偏向黄金、能源风险资产承压的尾部阶段。',
+    formula: 'GoldOil_Z = Z(Gold/Oil_t ÷ Gold/Oil_t-5 - 1, 252 个交易日)。',
+    weight: '15% 实时 / 23.1% 无新闻收盘模型',
+  },
+  {
+    id: 'vix', label: '市场传导：VIX', shortLabel: 'VIX', valueKey: 'vix', zKey: 'vixZ', unit: 'index', color: '#087e8b', activeClass: 'border-teal bg-teal text-white',
     source: 'FRED 系列 VIXCLS（CBOE Volatility Index）。',
     definition: '标普 500 期权隐含波动率，反映市场近期不确定性定价。',
     formula: '使用 FRED 最新有效 VIXCLS 收盘观测值。',
-    weight: '20%',
+    weight: '市场传导 10% 的一半',
   },
   {
     id: 'correlation', label: '相关性机制转移', shortLabel: '相关性代理', valueKey: 'correlation', zKey: 'correlationZ', unit: 'ratio', color: '#2563eb', activeClass: 'border-blue-600 bg-blue-600 text-white',
     source: 'Yahoo Finance SPY 日收盘；地区限制时使用 Alpha Vantage SPY（配置密钥后）或 FRED SP500 备用，与 FRED DGS10 日度 10 年期国债收益率对齐。',
     definition: '检测股票与债券是否由负相关转为正相关，以识别传统 60/40 对冲机制的潜在失效。',
     formula: 'rho_20d = CORREL(SPY_ret, -8 x Delta(DGS10)/100, 20 日)。',
-    weight: '25%',
-  },
-  {
-    id: 'liquidity', label: '流动性压力', shortLabel: '流动性代理', valueKey: 'liquidity', zKey: 'liquidityZ', unit: 'proxy', color: '#7c3aed', activeClass: 'border-violet-600 bg-violet-600 text-white',
-    source: 'FRED BAA10Y（Moody’s Baa 公司债相对 10 年期美债利差）。',
-    definition: '信用利差上升代表风险资产融资条件和二级市场流动性压力走高。',
-    formula: 'Liquidity = 100 x BAA10Y（换算为基点）。',
-    weight: '15%',
-  },
-  {
-    id: 'sentiment', label: '期权情绪', shortLabel: 'CBOE 情绪代理', valueKey: 'sentiment', zKey: 'sentimentZ', unit: 'proxy', color: '#be185d', activeClass: 'border-pink-700 bg-pink-700 text-white',
-    source: 'CBOE 公开 SKEW_History.csv（日度 CBOE SKEW Index）。',
-    definition: 'S&P 500 尾部风险的期权定价代理，数值越高代表市场对极端下行的定价越强。',
-    formula: 'Sentiment = CBOE SKEW History 的 Close 观测值。',
-    weight: '10%',
+    weight: '市场传导 10% 的一半',
   },
 ];
 
@@ -68,7 +68,7 @@ function formatDate(date: string) {
 }
 
 export default function FactorHistory({ records }: { records: RiskRecord[] }) {
-  const [selected, setSelected] = useState<FactorId[]>(['brent', 'vix']);
+  const [selected, setSelected] = useState<FactorId[]>(['oilSpread', 'oilIv']);
   const [range, setRange] = useState<30 | 90 | 365>(90);
   const [chartType, setChartType] = useState<'line' | 'bar'>('line');
   const [scale, setScale] = useState<'raw' | 'z'>('raw');
@@ -126,7 +126,7 @@ export default function FactorHistory({ records }: { records: RiskRecord[] }) {
       </div>
 
       <div className="mt-5 grid gap-3 border-t border-slate-100 pt-5 lg:grid-cols-2">
-        <article className="border-l-4 border-teal bg-teal/5 p-4"><h3 className="font-semibold text-ink">收盘模型公式</h3><p className="mt-2 text-sm leading-6 text-slate-600">布伦特冲击、VIX、信用利差和 SKEW 使用 252 个交易日标准化；股债相关性使用五年滚动基线。综合得分 = 0.30 BrentShock_Z + 0.25 Corr_Z + 0.20 VIX_Z + 0.15 Liquidity_Z + 0.10 SKEW_Z。AI-GPR 权重为 0%，仅在下方作为滞后参考序列。</p></article>
+        <article className="border-l-4 border-teal bg-teal/5 p-4"><h3 className="font-semibold text-ink">实时与收盘模型公式</h3><p className="mt-2 text-sm leading-6 text-slate-600">实时得分 = 0.35 NewsPulse_Z + 0.25 OilSpread_Z + 0.15 OilIV_Z + 0.15 GoldOil_Z + 0.10 MarketTransmission_Z。MarketTransmission = 0.5 VIX_Z + 0.5 股债相关_Z。无 15 分钟新闻历史的收盘回测对四个市场因子重新归一化。AI-GPR 权重为 0%，仅在下方作为滞后参考序列。</p></article>
         <article className="border-l-4 border-signal bg-orange-50 p-4"><h3 className="font-semibold text-ink">读图约定</h3><p className="mt-2 text-sm leading-6 text-slate-600">原始值用于检查数据本身；Z-score 用于跨因子的相对极端程度比较。权重反映因子在综合风险得分中的线性贡献，不代表单独交易仓位。</p></article>
       </div>
 

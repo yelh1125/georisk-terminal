@@ -6,7 +6,10 @@ import type { NowcastResponse, RawFactors, RealtimeRiskSnapshot, RiskResponse, S
 
 export async function ensureRiskHistory(forcePublishedRefresh = false): Promise<{ records: import('@/lib/types').RiskRecord[]; source: 'live' }> {
   let { records, source } = await getRiskHistory(5_000);
-  if (source === 'unavailable' || forcePublishedRefresh) {
+  // Rows written before the geo-premium model have zero-filled new columns after migration.
+  // Rebuild rather than mixing them into a Z-score/backtest window.
+  const hasPreGeoPremiumRows = records.some((row) => row.oilIv <= 0 || row.goldOilRatio <= 0);
+  if (source === 'unavailable' || forcePublishedRefresh || hasPreGeoPremiumRows) {
     if (forcePublishedRefresh) invalidatePublishedGprCache();
     const raw = await fetchRealFactorHistory();
     records = raw.map((row, index) => calculateRiskRecord(raw.slice(0, index), row));
@@ -27,7 +30,7 @@ export async function runDailyRiskUpdate(): Promise<RiskResponse> {
   const { records } = await ensureRiskHistory();
   const raw = await fetchCurrentFactors();
   const current = calculateRiskRecord(records, {
-    date: raw.date, brent: raw.brent,
+    date: raw.date, brent: raw.brent, oilSpread: raw.oilSpread, oilIv: raw.oilIv, goldOilRatio: raw.goldOilRatio,
     gpr: raw.gpr, correlation: raw.correlation, vix: raw.vix, liquidity: raw.liquidity, sentiment: raw.sentiment,
   });
   const source = await upsertRiskRecord(current);
@@ -44,7 +47,7 @@ const round = (value: number) => Number(value.toFixed(3));
 const clip = (value: number, lower = -3, upper = 3) => Math.max(lower, Math.min(upper, value));
 
 function rawFactors(records: import('@/lib/types').RiskRecord[]): RawFactors[] {
-  return records.map(({ date, brent, gpr, correlation, vix, liquidity, sentiment }) => ({ date, brent, gpr, correlation, vix, liquidity, sentiment }));
+  return records.map(({ date, brent, oilSpread, oilIv, goldOilRatio, gpr, correlation, vix, liquidity, sentiment }) => ({ date, brent, oilSpread, oilIv, goldOilRatio, gpr, correlation, vix, liquidity, sentiment }));
 }
 
 function differenceInDays(later: string, earlier: string): number {
@@ -139,8 +142,8 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
   if (!newsResult) gprSource = 'ESTIMATED';
   const marketFactors = calculateRiskRecord(history, marketRaw);
   const newsPulseZ = clip(newsResult?.pulseZ ?? (lastKnown?.pulseZ ?? 0) * 0.75, 0, 3);
-  // AI-GPR has zero score weight. Real-time score uses timely market closes and high-frequency news only.
-  const marketScore = 0.20 * marketFactors.brentZ + 0.30 * newsPulseZ + 0.20 * marketFactors.correlationZ + 0.15 * marketFactors.vixZ + 0.10 * marketFactors.liquidityZ + 0.05 * marketFactors.sentimentZ;
+  // AI-GPR has zero score weight. Live score gives 35% to the independently updated conflict-news pulse.
+  const marketScore = 0.35 * newsPulseZ + 0.25 * marketFactors.oilSpreadZ + 0.15 * marketFactors.oilIvZ + 0.15 * marketFactors.goldOilZ + 0.10 * marketFactors.marketTransmissionZ;
   const riskScore = marketScore;
   const riskLevel = chineseRiskLevel(riskScore);
   const action = actionFor(riskScore, newsPulseZ);
@@ -152,7 +155,10 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
     calc_date: calcDate,
     gpr_release_date: latestPublished.date,
     market_factors: {
-      brent_z: marketFactors.brentZ,
+      oil_spread_z: marketFactors.oilSpreadZ,
+      oil_iv_z: marketFactors.oilIvZ,
+      gold_oil_z: marketFactors.goldOilZ,
+      market_transmission_z: marketFactors.marketTransmissionZ,
       rho_eq_bond_z: marketFactors.correlationZ,
       vix_z: marketFactors.vixZ,
       baa10y_z: marketFactors.liquidityZ,
