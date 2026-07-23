@@ -28,6 +28,18 @@ function formatDate(date: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(new Date(`${date}T00:00:00Z`));
 }
 
+function newsSourceLabel(source: NowcastResponse['newsSource']): string {
+  if (source === 'gdelt_multisource') return 'GDELT + NewsAPI + Google + BBC';
+  if (source === 'gdelt_newsapi') return 'GDELT + NewsAPI';
+  if (source === 'gdelt_google') return 'GDELT + Google';
+  if (source === 'gdelt_bbc') return 'GDELT + BBC';
+  if (source === 'google_bbc') return 'Google + BBC';
+  if (source === 'google_rss') return 'Google News RSS';
+  if (source === 'bbc_rss') return 'BBC World RSS';
+  if (source === 'newsapi') return 'NewsAPI';
+  return source === 'gdelt_events' ? 'GDELT Event' : 'GDELT';
+}
+
 function FactorCard({ label, value, unit, z, previous }: { label: string; value: number; unit: string; z: number; previous?: number }) {
   const delta = previous === undefined ? 0 : ((value - previous) / Math.max(Math.abs(previous), 0.001)) * 100;
   return (
@@ -84,9 +96,9 @@ export default function Dashboard() {
             <div className="grid gap-0 lg:grid-cols-[1.35fr_repeat(4,minmax(0,1fr))]">
               <div className="border-b border-slate-200 p-5 lg:border-b-0 lg:border-r"><div className="flex items-center gap-2 text-teal"><Radio size={17} /><span className="text-xs font-semibold uppercase tracking-[0.13em]">Real-time pulse</span></div><div className="mt-2 flex items-end gap-3"><strong className="font-mono text-4xl leading-none">{nowcast.score.toFixed(2)}</strong><span className={`mb-0.5 px-2 py-1 text-xs font-semibold ${riskMeta[nowcast.riskLevel].surface} ${riskMeta[nowcast.riskLevel].text}`}>{riskMeta[nowcast.riskLevel].label}</span></div><p className="mt-3 text-sm leading-6 text-slate-600">{nowcast.signal.title}</p></div>
               <div className="border-b border-slate-200 p-5 lg:border-b-0 lg:border-r"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">下一交易日情景</p><strong className="mt-2 block font-mono text-2xl">{nowcast.tomorrowScore.toFixed(2)}</strong><p className="mt-2 text-xs leading-5 text-slate-500">仅延续当前新闻脉冲，不构成价格预测</p></div>
-              <div className="border-b border-slate-200 p-5 lg:border-b-0 lg:border-r"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">新闻事件脉冲</p><strong className="mt-2 block font-mono text-2xl">+{nowcast.newsPulseZ.toFixed(2)} Z</strong><p className="mt-2 text-xs leading-5 text-slate-500">{nowcast.newsStatus === 'live' ? `${nowcast.newsSource === 'newsapi' ? 'NewsAPI' : nowcast.newsSource === 'gdelt_newsapi' ? 'GDELT + NewsAPI' : nowcast.newsSource === 'google_rss' ? 'Google News RSS' : nowcast.newsSource === 'gdelt_google' ? 'GDELT + Google' : 'GDELT'} · ${nowcast.articleCount.toLocaleString()} 篇 · 负面 ${(nowcast.negativeSentimentRatio * 100).toFixed(0)}%${nowcast.comboBoost ? ' · 组合加成' : ''}` : '双源新闻暂不可用，沿用衰减脉冲'}</p></div>
+              <div className="border-b border-slate-200 p-5 lg:border-b-0 lg:border-r"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">新闻事件脉冲</p><strong className="mt-2 block font-mono text-2xl">+{nowcast.newsPulseZ.toFixed(2)} Z</strong><p className="mt-2 text-xs leading-5 text-slate-500">{nowcast.newsStatus === 'live' ? `${newsSourceLabel(nowcast.newsSource)} · ${nowcast.articleCount.toLocaleString()} 篇 · 负面 ${(nowcast.negativeSentimentRatio * 100).toFixed(0)}%${nowcast.comboBoost ? ' · 组合加成' : ''}` : '多源新闻暂不可用，沿用衰减脉冲'}</p></div>
               <div className="border-b border-slate-200 p-5 lg:border-b-0 lg:border-r"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">逐因子最新观测</p><strong className="mt-2 block text-lg">{nowcast.marketAsOf}</strong><p className="mt-2 text-xs leading-5 text-slate-500">价差 {nowcast.factorAsOf.oilSpread} · OVX {nowcast.factorAsOf.oilIv}<br />Gold/Oil {nowcast.factorAsOf.goldOil} · VIX/相关 {nowcast.factorAsOf.vix}/{nowcast.factorAsOf.correlation}</p></div>
-              <div className="p-5"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">布伦特收盘 / GPR 发布</p><strong className="mt-2 block text-lg">${nowcast.brentClose.toFixed(2)} · {nowcast.gprAsOf}</strong><p className="mt-2 text-xs leading-5 text-slate-500">价差、OVX、Gold/Oil 是模型因子；AI-GPR 仅作回测基准</p></div>
+              <div className="p-5"><p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500">布伦特最新日线</p><strong className="mt-2 block text-lg">${nowcast.brentClose.toFixed(2)} · {nowcast.brentAsOf}</strong><p className="mt-2 text-xs leading-5 text-slate-500">数据：{nowcast.brentSource === 'yahoo_bz_f' ? 'Yahoo Finance BZ=F（前月期货日线）' : 'FRED DCOILBRENTEU（现货日度）'}<br />用于 Brent-WTI 价差因子</p></div>
             </div>
           </div>
           <aside className="border border-slate-200 bg-white p-5 shadow-panel" aria-label="实时风险指标说明">
@@ -94,8 +106,8 @@ export default function Dashboard() {
             <p className="mt-3 text-sm leading-6 text-slate-600">实时得分使用可在收盘后获得的市场与新闻数据。AI-GPR 不再参与得分，只保留在回测图中核验模型是否与已发布的学术指标一致。</p>
             <dl className="mt-4 space-y-2.5 text-xs leading-5 text-slate-600">
               <div><dt className="font-semibold text-ink">五因子实时得分</dt><dd>0.35 GDELT 新闻脉冲 + 0.25 Brent-WTI 价差 Z + 0.15 原油 IV (OVX) Z + 0.15 Gold/Oil 五日变化 Z + 0.10 市场传导 Z（VIX 与股债相关各半）。AI-GPR 权重为 0%。</dd></div>
-              <div><dt className="font-semibold text-ink">新闻与记忆</dt><dd>GDELT DOC 统计关键词和情感；DOC 限流时，自动使用每 15 分钟发布的 GDELT Event 结构化冲突事件（CAMEO 18/19/20 与负向 Goldstein）。新闻脉冲 = 计数 Z 与负面情感 Z 的加权值；制裁+关税+军事行动加 0.50，并保留上一期脉冲的 75%。</dd></div>
-              <div><dt className="font-semibold text-ink">时间戳</dt><dd>“市场观测日”代表市场收盘数据日期；“GPR 发布日”只代表回测标签的最后可用日期，两者分开显示，避免把滞后数据当作当日观测。</dd></div>
+              <div><dt className="font-semibold text-ink">新闻与记忆</dt><dd>GDELT 提供 15 分钟事件与主计数；Google News RSS、BBC World RSS 与可选 NewsAPI 对负面情感和组合事件做独立确认。DOC 限流时自动使用 GDELT Event 的 CAMEO 18/19/20 与负向 Goldstein。制裁+关税+军事行动加 0.50，并保留上一期脉冲的 75%。</dd></div>
+              <div><dt className="font-semibold text-ink">时间戳</dt><dd>“市场观测日”是各市场因子的最后可用收盘日；布伦特卡片显示其自身日期。AI-GPR 只在页面下方的回测对照中出现，不参与实时风险分数。</dd></div>
             </dl>
             <div className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-4 text-xs">
               <div className="border-l-2 border-emerald-500 pl-2"><strong className="block text-ink">&lt; 0.30 低</strong><span className="text-slate-500">维持监测</span></div>

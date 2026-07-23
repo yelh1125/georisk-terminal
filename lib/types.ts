@@ -54,6 +54,7 @@ export interface NowcastResponse {
   marketAsOf: string;
   brentAsOf: string;
   brentClose: number;
+  brentSource: 'yahoo_bz_f' | 'fred_dcoilbrenteu';
   factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
   gprAsOf: string;
   newsAsOf: string;
@@ -61,7 +62,7 @@ export interface NowcastResponse {
   articleCount: number;
   negativeSentimentRatio: number;
   comboBoost: number;
-  newsSource: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events' | 'estimated';
+  newsSource: 'gdelt_multisource' | 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'gdelt_bbc' | 'google_bbc' | 'google_rss' | 'bbc_rss' | 'gdelt' | 'gdelt_events' | 'estimated';
   newsStatus: 'live' | 'estimated';
   signal: StrategySignal;
 }

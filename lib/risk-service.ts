@@ -39,9 +39,9 @@ export async function runDailyRiskUpdate(): Promise<RiskResponse> {
   return { latest: current, signal: determineStrategy(updatedHistory, current), updatedAt: new Date().toISOString(), source };
 }
 
-type NewsObservation = { count: number; negativeRatio: number; comboDetected: boolean; source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events'; observedAt: string };
+type NewsObservation = { count: number; negativeRatio: number; comboDetected: boolean; source: 'gdelt_multisource' | 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'gdelt_bbc' | 'google_bbc' | 'google_rss' | 'bbc_rss' | 'gdelt' | 'gdelt_events'; observedAt: string };
 type NewsMetrics = { pulseZ: number; rawZ: number; count: number; negativeRatio: number; comboBoost: number; asOf: string; source: NewsObservation['source'] };
-type RealtimeCalculation = { snapshot: RealtimeRiskSnapshot; marketAsOf: string; brentAsOf: string; brentClose: number; factorAsOf: NowcastResponse['factorAsOf']; newsAsOf: string; articleCount: number; negativeSentimentRatio: number; comboBoost: number; newsSource: NowcastResponse['newsSource']; newsLive: boolean };
+type RealtimeCalculation = { snapshot: RealtimeRiskSnapshot; marketAsOf: string; brentAsOf: string; brentClose: number; brentSource: NowcastResponse['brentSource']; factorAsOf: NowcastResponse['factorAsOf']; newsAsOf: string; articleCount: number; negativeSentimentRatio: number; comboBoost: number; newsSource: NowcastResponse['newsSource']; newsLive: boolean };
 
 const round = (value: number) => Number(value.toFixed(3));
 const clip = (value: number, lower = -3, upper = 3) => Math.max(lower, Math.min(upper, value));
@@ -56,7 +56,8 @@ function differenceInDays(later: string, earlier: string): number {
 
 async function getFreshMarketSnapshot(gprReference: number): Promise<FreshMarketFactors> {
   const cached = await getCache<FreshMarketFactors>('risk:market:current');
-  if (cached) return cached;
+  // Source provenance was added after the original cache schema; refresh older snapshots.
+  if (cached?.brentSource) return cached;
   const market = await fetchFreshMarketFactors(gprReference);
   await setCache('risk:market:current', market, 5 * 60);
   return market;
@@ -91,7 +92,7 @@ async function getHighFrequencyNewsMetrics(): Promise<NewsMetrics> {
   const sameSource = allHistory.filter((item) => item.source === current!.source && item.observedAt !== current!.observedAt);
   const countHistory = sameSource.map((item) => Math.log(item.count + 1));
   const sentimentHistory = sameSource.map((item) => item.negativeRatio);
-  const gdeltScale = current.source === 'gdelt_newsapi' || current.source === 'gdelt_google' || current.source === 'gdelt';
+  const gdeltScale = current.source === 'gdelt_multisource' || current.source === 'gdelt_newsapi' || current.source === 'gdelt_google' || current.source === 'gdelt_bbc' || current.source === 'gdelt';
   const eventScale = current.source === 'gdelt_events';
   const countZ = zWithBootstrap(Math.log(current.count + 1), countHistory, eventScale ? Math.log(250) : gdeltScale ? Math.log(12_000) : Math.log(20), eventScale ? 0.8 : gdeltScale ? 0.55 : 0.65);
   const sentimentZ = zWithBootstrap(current.negativeRatio, sentimentHistory, 0.55, 0.18);
@@ -154,7 +155,7 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
   const riskLevel = chineseRiskLevel(riskScore);
   const action = actionFor(riskScore, newsPulseZ);
   const newsComment = newsResult
-    ? `${newsResult.source === 'gdelt_newsapi' ? 'GDELT 计数与 NewsAPI 情感' : newsResult.source === 'newsapi' ? 'NewsAPI 计数与情感' : newsResult.source === 'gdelt_google' ? 'GDELT 计数与 Google News 情感' : newsResult.source === 'google_rss' ? 'Google News RSS 计数与情感' : 'GDELT 计数'}驱动新闻脉冲 ${newsPulseZ.toFixed(2)}Z${newsResult.comboBoost ? '，制裁+关税+军事行动组合拳加成 +0.50' : ''}`
+    ? `${newsResult.source === 'gdelt_multisource' ? 'GDELT 计数与 NewsAPI、Google News、BBC World 交叉确认' : newsResult.source === 'gdelt_newsapi' ? 'GDELT 计数与 NewsAPI 情感' : newsResult.source === 'newsapi' ? 'NewsAPI 计数与情感' : newsResult.source === 'gdelt_google' ? 'GDELT 计数与 Google News 情感' : newsResult.source === 'gdelt_bbc' ? 'GDELT 计数与 BBC World 情感' : newsResult.source === 'google_bbc' ? 'Google News 与 BBC World 情感' : newsResult.source === 'google_rss' ? 'Google News RSS 计数与情感' : newsResult.source === 'bbc_rss' ? 'BBC World RSS 计数与情感' : 'GDELT 计数'}驱动新闻脉冲 ${newsPulseZ.toFixed(2)}Z${newsResult.comboBoost ? '，制裁+关税+军事行动组合拳加成 +0.50' : ''}`
     : '两路高频新闻源暂不可用，沿用衰减后的上一期新闻脉冲 [ESTIMATED]';
   const lagComment = `${lagDays > 5 ? `AI-GPR滞后${lagDays}天，` : ''}AI-GPR仅用于回测对照，权重为 0%。${marketRaw.goldOilRatio > 0 ? '' : ' Gold/Oil 数据源不可用，实时权重已在可用因子间重新归一化。'}`;
   const snapshot: RealtimeRiskSnapshot = {
@@ -185,6 +186,7 @@ async function calculateRealtimeRisk(): Promise<RealtimeCalculation> {
     marketAsOf: marketRaw.date,
     brentAsOf: marketRaw.factorAsOf.brent,
     brentClose: marketRaw.brent,
+    brentSource: marketRaw.brentSource,
     factorAsOf: marketRaw.factorAsOf,
     newsAsOf: newsResult?.asOf ?? 'unavailable',
     articleCount: newsResult?.count ?? 0,
@@ -212,6 +214,7 @@ export async function getRiskNowcast(): Promise<NowcastResponse> {
     marketAsOf: result.marketAsOf,
     brentAsOf: result.brentAsOf,
     brentClose: result.brentClose,
+    brentSource: result.brentSource,
     factorAsOf: result.factorAsOf,
     gprAsOf: snapshot.gpr_release_date,
     newsAsOf: result.newsAsOf,

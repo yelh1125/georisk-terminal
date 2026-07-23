@@ -10,12 +10,14 @@ const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/SPY';
 const YAHOO_BRENT_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/BZ=F';
 const YAHOO_GOLD_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/GC=F';
 const YAHOO_WTI_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/CL=F';
+const TWELVE_DATA_TIME_SERIES_URL = 'https://api.twelvedata.com/time_series';
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const CBOE_SKEW_HISTORY_URL = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv';
 const REQUEST_TIMEOUT = 25_000;
 const GDELT_DOC_URL = 'https://api.gdeltproject.org/api/v2/doc/doc';
 const GDELT_LAST_UPDATE_URL = 'https://data.gdeltproject.org/gdeltv2/lastupdate.txt';
 const GOOGLE_NEWS_RSS_URL = 'https://news.google.com/rss/search';
+const BBC_WORLD_RSS_URL = 'https://feeds.bbci.co.uk/news/world/rss.xml';
 const GDELT_RISK_QUERY = '(war OR missile OR invasion OR sanction OR tariff OR nuclear OR "nuclear talks" OR terror OR blockade OR airstrike OR "military conflict")';
 const NEWS_QUERY = '(war OR missile OR invasion OR sanction OR tariff OR nuclear OR "nuclear talks" OR terror OR blockade OR airstrike OR "military conflict") when:1d';
 
@@ -23,6 +25,7 @@ type NumericSeries = Map<string, number>;
 type GprComponents = { total: number; threat: number; act: number };
 type YahooResponse = { chart?: { result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ close?: Array<number | null> }> } }> } };
 type AlphaVantageResponse = { 'Time Series (Daily)'?: Record<string, { '4. close'?: string }> };
+type TwelveDataResponse = { status?: string; message?: string; values?: Array<{ datetime?: string; close?: string }> };
 type GdeltPoint = { date?: string; value?: number; norm?: number };
 type GdeltResponse = { timeline?: Array<{ data?: GdeltPoint[] }> };
 type GdeltArticleResponse = { articles?: Array<{ title?: string }> };
@@ -31,10 +34,11 @@ export type HighFrequencyNews = {
   negativeRatio: number;
   comboDetected: boolean;
   asOf: string;
-  source: 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'google_rss' | 'gdelt' | 'gdelt_events';
+  source: 'gdelt_multisource' | 'gdelt_newsapi' | 'newsapi' | 'gdelt_google' | 'gdelt_bbc' | 'google_bbc' | 'google_rss' | 'bbc_rss' | 'gdelt' | 'gdelt_events';
 };
 
 export type FreshMarketFactors = RawFactors & {
+  brentSource: 'yahoo_bz_f' | 'fred_dcoilbrenteu';
   factorAsOf: { brent: string; oilSpread: string; oilIv: string; goldOil: string; correlation: string; vix: string; liquidity: string; sentiment: string };
 };
 
@@ -199,8 +203,10 @@ async function fetchSpyCloseSeries(startDate: string): Promise<NumericSeries> {
   return fetchFredSeries('SP500');
 }
 
+type BrentMarketSeries = { series: NumericSeries; source: 'yahoo_bz_f' | 'fred_dcoilbrenteu' };
+
 /** Brent futures close is the timely oil-market input; FRED's spot series is the published fallback. */
-async function fetchBrentCloseSeries(startDate: string): Promise<NumericSeries> {
+async function fetchBrentMarketSeries(startDate: string): Promise<BrentMarketSeries> {
   const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
   const period2 = Math.floor(Date.now() / 1000) + 86_400;
   try {
@@ -216,14 +222,37 @@ async function fetchBrentCloseSeries(startDate: string): Promise<NumericSeries> 
       const close = closes[index];
       if (close !== null && close !== undefined && Number.isFinite(close)) series.set(new Date(timestamp * 1000).toISOString().slice(0, 10), close);
     });
-    if (series.size) return series;
+    if (series.size) return { series, source: 'yahoo_bz_f' };
   } catch (error) {
     console.warn('[fetch] Yahoo Brent unavailable; using FRED DCOILBRENTEU fallback', error instanceof Error ? error.message : error);
   }
-  return fetchFredSeries('DCOILBRENTEU');
+  return { series: await fetchFredSeries('DCOILBRENTEU'), source: 'fred_dcoilbrenteu' };
+}
+
+async function fetchBrentCloseSeries(startDate: string): Promise<NumericSeries> {
+  return (await fetchBrentMarketSeries(startDate)).series;
 }
 
 async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
+  const twelveDataKey = process.env.TWELVE_DATA_API_KEY;
+  if (twelveDataKey) {
+    try {
+      const { data } = await axios.get<TwelveDataResponse>(TWELVE_DATA_TIME_SERIES_URL, {
+        params: { symbol: 'XAU/USD', interval: '1day', outputsize: 5000, timezone: 'UTC', apikey: twelveDataKey }, timeout: REQUEST_TIMEOUT,
+      });
+      if (data.status === 'error') throw new Error(data.message ?? 'Twelve Data returned an error');
+      const series: NumericSeries = new Map();
+      (data.values ?? []).forEach((row) => {
+        const date = normalizeDate(row.datetime);
+        const close = finite(row.close);
+        if (date && date >= startDate && close !== null) series.set(date, close);
+      });
+      if (series.size >= 252) return series;
+      throw new Error(`Twelve Data returned only ${series.size} usable XAU/USD daily observations`);
+    } catch (error) {
+      console.warn('[fetch] Twelve Data XAU/USD unavailable; trying Yahoo fallback', error instanceof Error ? error.message : error);
+    }
+  }
   const period1 = Math.floor(new Date(`${startDate}T00:00:00Z`).getTime() / 1000);
   const period2 = Math.floor(Date.now() / 1000) + 86_400;
   try {
@@ -243,7 +272,7 @@ async function fetchGoldCloseSeries(startDate: string): Promise<NumericSeries> {
   } catch (error) {
     console.warn('[fetch] Yahoo gold unavailable; Gold/Oil factor will be excluded', error instanceof Error ? error.message : error);
   }
-  throw new Error('No server-accessible gold price fallback is currently available');
+  throw new Error('No usable gold series. Configure TWELVE_DATA_API_KEY for stable XAU/USD history.');
 }
 
 async function fetchWtiCloseSeries(startDate: string): Promise<NumericSeries> {
@@ -359,9 +388,10 @@ export async function fetchCurrentFactors(): Promise<RawFactors> {
 /** Builds a current market snapshot independently of the slower published GPR/AI-GPR vintage. */
 export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMarketFactors> {
   const startDate = '2010-01-01';
-  const [vix, skew, dgs10, baa10y, spy, brent, wti, oilIv, gold] = await Promise.all([
-    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentCloseSeries(startDate), fetchWtiCloseSeries(startDate), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate).catch((error) => { console.warn('[fetch] Gold/Oil factor unavailable; real-time score will re-normalize', error instanceof Error ? error.message : error); return null; }),
+  const [vix, skew, dgs10, baa10y, spy, brentMarket, wti, oilIv, gold] = await Promise.all([
+    fetchFredSeries('VIXCLS'), fetchCboeSkewSeries(), fetchFredSeries('DGS10'), fetchFredSeries('BAA10Y'), fetchSpyCloseSeries(startDate), fetchBrentMarketSeries(startDate), fetchWtiCloseSeries(startDate), fetchFredSeries('OVXCLS'), fetchGoldCloseSeries(startDate).catch((error) => { console.warn('[fetch] Gold/Oil factor unavailable; real-time score will re-normalize', error instanceof Error ? error.message : error); return null; }),
   ]);
+  const brent = brentMarket.series;
   // Do not require a common date: SKEW and Baa spreads can publish after the futures market.
   // Each component uses its own latest published value and exposes its as-of date to the UI.
   const latestDate = (series: NumericSeries, label: string) => {
@@ -404,6 +434,7 @@ export async function fetchFreshMarketFactors(gprReference = 0): Promise<FreshMa
     vix: vix.get(factorAsOf.vix)!,
     liquidity: Number((baa10y.get(factorAsOf.liquidity)! * 100).toFixed(2)),
     sentiment: skew.get(factorAsOf.sentiment)!,
+    brentSource: brentMarket.source,
     factorAsOf,
   };
 }
@@ -534,6 +565,27 @@ async function fetchGoogleNewsHeadlines(): Promise<{ count: number; negativeRati
   };
 }
 
+/** BBC World RSS is a no-key, editorially independent confirmation source for the news pulse. */
+async function fetchBbcWorldHeadlines(): Promise<{ count: number; negativeRatio: number; comboDetected: boolean; asOf: string }> {
+  const { data } = await axios.get<string>(BBC_WORLD_RSS_URL, {
+    timeout: 6_000, responseType: 'text', headers: { 'User-Agent': 'Mozilla/5.0 (GeoRiskTerminal; research monitor)' },
+  });
+  const $ = cheerio.load(data, { xmlMode: true });
+  const cutoff = Date.now() - 30 * 60 * 60 * 1000;
+  const relevant = /\b(war|missile|invasion|attack|airstrike|strike|terror|blockade|sanction|tariff|nuclear|military|conflict)\b/i;
+  const texts: string[] = [];
+  $('item').each((_, item) => {
+    const title = $(item).find('title').first().text().trim();
+    const description = $(item).find('description').first().text().trim();
+    const published = Date.parse($(item).find('pubDate').first().text());
+    const text = `${title} ${description}`.trim();
+    if (text && relevant.test(text) && (!Number.isFinite(published) || published >= cutoff)) texts.push(text.toLowerCase());
+  });
+  if (texts.length < 1) throw new Error('BBC World RSS returned no current geopolitically relevant headlines');
+  const analysis = analyzeNewsTexts(texts);
+  return { count: texts.length, ...analysis, asOf: new Date().toISOString() };
+}
+
 function analyzeNewsTexts(texts: string[]): { negativeRatio: number; comboDetected: boolean } {
   const negative = /\b(war|missile|invasion|attack|airstrike|strike|terror|blockade|retaliat|escalat|killed|casualt)\b/i;
   const military = /\b(war|missile|invasion|attack|airstrike|strike|military|conflict)\b/i;
@@ -564,25 +616,44 @@ async function fetchNewsApiHeadlines(): Promise<{ count: number; negativeRatio: 
 }
 
 /**
- * Primary count is GDELT when available; Google News RSS provides independent headline sentiment
- * and becomes the count fallback. A GDELT outage therefore cannot silently zero the news factor.
+ * GDELT remains the calibrated article-count series. Independent editorial feeds confirm
+ * sentiment and escalation combinations even when GDELT itself remains available.
  */
 export async function fetchHighFrequencyNews(): Promise<HighFrequencyNews> {
-  const gdelt = await fetchGdeltCurrentArticleCount().catch(() => null);
+  const [gdelt, gdeltSentiment, newsApi, google, bbc] = await Promise.all([
+    fetchGdeltCurrentArticleCount().catch(() => null),
+    fetchGdeltHeadlineSentiment().catch(() => null),
+    fetchNewsApiHeadlines().catch(() => null),
+    fetchGoogleNewsHeadlines().catch(() => null),
+    fetchBbcWorldHeadlines().catch(() => null),
+  ]);
+
   if (gdelt) {
-    // The headline lookup follows the count request through the API's five-second pacing queue.
-    const sentiment = await fetchGdeltHeadlineSentiment().catch(() => null);
-    return { count: gdelt.count, negativeRatio: sentiment?.negativeRatio ?? 0.5, comboDetected: sentiment?.comboDetected ?? false, asOf: gdelt.asOf, source: 'gdelt' };
+    const independent = [newsApi, google, bbc].filter((item): item is NonNullable<typeof item> => item !== null);
+    const independentSentiment = independent.length ? independent.reduce((sum, item) => sum + item.negativeRatio, 0) / independent.length : null;
+    const negativeRatio = gdeltSentiment && independentSentiment !== null
+      ? 0.6 * gdeltSentiment.negativeRatio + 0.4 * independentSentiment
+      : gdeltSentiment?.negativeRatio ?? independentSentiment ?? 0.5;
+    const comboDetected = [gdeltSentiment, ...independent].some((item) => item?.comboDetected);
+    const source = newsApi && google && bbc ? 'gdelt_multisource' : newsApi ? 'gdelt_newsapi' : google ? 'gdelt_google' : bbc ? 'gdelt_bbc' : 'gdelt';
+    return { count: gdelt.count, negativeRatio, comboDetected, asOf: gdelt.asOf, source };
   }
 
   const gdeltEvents = await fetchGdeltEventConflictIntensity().catch(() => null);
   if (gdeltEvents) return { ...gdeltEvents, source: 'gdelt_events' };
 
-  // Only enter slower independent fallbacks after the primary high-frequency feed actually fails.
-  const newsApi = await fetchNewsApiHeadlines().catch(() => null);
+  // GDELT failed: use the independent feeds as the calibrated count fallback.
   if (newsApi) return { ...newsApi, source: 'newsapi' };
-  const google = await fetchGoogleNewsHeadlines().catch(() => null);
+  if (google && bbc) {
+    return {
+      count: Math.round((google.count + bbc.count) / 2),
+      negativeRatio: (google.negativeRatio + bbc.negativeRatio) / 2,
+      comboDetected: google.comboDetected || bbc.comboDetected,
+      asOf: new Date().toISOString(), source: 'google_bbc',
+    };
+  }
   if (google) return { ...google, source: 'google_rss' };
+  if (bbc) return { ...bbc, source: 'bbc_rss' };
   throw new Error('GDELT and independent high-frequency news sources are unavailable');
 }
 

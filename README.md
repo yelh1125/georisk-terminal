@@ -78,9 +78,9 @@
 | `GET /api/risk/realtime` | 严格 JSON 实时风险快照，字段为 `calc_date`、`gpr_release_date`、`market_factors`、`news_pulse_z`、`market_score`、`risk_score`、`risk_level`、`action`、`news_trigger`、`comment` |
 | `POST /api/risk/update` | 触发抓取、计算、写库和缓存失效；设置 `CRON_SECRET` 后需请求头 `x-cron-secret` |
 
-抓取器使用 Yahoo Finance `BZ=F` 布伦特和 `GC=F` 黄金期货日收盘（布伦特不可用时回退至 FRED `DCOILBRENTEU`；黄金行情受限时 Gold/Oil 作为可选增强因子自动排除并重新归一化）、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
+抓取器使用 Yahoo Finance `BZ=F` 布伦特、FRED `DCOILWTICO`、`OVXCLS`、`VIXCLS`/`DGS10`/`BAA10Y`、CBOE `SKEW_History.csv`，以及 SPY 日收盘（Yahoo，地区受限时依序回退至 Alpha Vantage 和 FRED `SP500`）。设置 `TWELVE_DATA_API_KEY` 后，Gold/Oil 使用 Twelve Data `XAU/USD` 5,000 点日线历史与最新观测；未设置或供应商不可用时，该增强因子自动排除并重新归一化。官方 AI-GPR 日度 CSV（`GPR_AI`、`THREATS_GPR_AI`、`ACTS_GPR_AI`）按 `0.50 Threat + 0.35 Acts + 0.15 Total` 合成，仅供回测。可选的 `GPR_DAILY_XLS_URL` 可接入从 Iacoviello 官网下载的传统 GPR Excel，用于传统 GPR 交叉核验；系统不生成模拟曲线。
 
-AI-GPR 是低频回测序列，而非当日观测：系统将 `gpr_release_date` 与 `calc_date` 分开输出，且它不参与实时得分。高频新闻同时统计文章计数与标题/摘要负面情感比例，关键词包括 `war`、`missile`、`invasion`、`sanction`、`tariff`、`blockade`、`airstrike` 与 `nuclear talks`。GDELT 提供主计数和文章标题情感；配置 `NEWS_API_KEY` 后 NewsAPI 是独立生产回退，Google News RSS 仅为无密钥备选。
+AI-GPR 是低频回测序列，而非当日观测，不参与实时得分。高频新闻同时统计文章计数与标题/摘要负面情感比例，关键词包括 `war`、`missile`、`invasion`、`sanction`、`tariff`、`blockade`、`airstrike` 与 `nuclear talks`。GDELT 提供经校准的主计数和事件导出；Google News RSS、BBC World RSS 与配置了 `NEWS_API_KEY` 的 NewsAPI 并行确认情感及组合事件，避免单一来源漏报地区冲突。
 
 实时风险得分为 `0.35 NewsPulse_Z + 0.25 OilSpread_Z + 0.15 OilIV_Z + 0.15 GoldOil_Z + 0.10 MarketTransmission_Z`，其中 `MarketTransmission_Z = 0.5 VIX_Z + 0.5 rho_eq_bond_Z`。`NewsPulse_Z = clip(0.60 Count_Z + 0.40 NegativeSentiment_Z + ComboBoost, 0, 3)`；若同时检测到制裁/封锁、关税/贸易战和军事行动，`ComboBoost = +0.50`。记忆状态为 `max(当前脉冲, 0.75 x 上一期脉冲)`，因此冲突未决时风险不会立即归零。GDELT DOC 限流时，系统直接下载最新的 GDELT 2.0 Event 15 分钟导出文件，并以 CAMEO 18/19/20 的负向事件强度继续计算脉冲。市场因子不再强制同日对齐；接口单独披露每项的 `asOf` 日期。新闻脉冲超过 `1.20` 提高对冲，超过 `2.00` 进入强对冲审查。两路实时新闻均不可用时，系统保留衰减后的上一期状态并以 `ESTIMATED` 明示。系统只报告当前风险温度，不预测价格方向。
 
